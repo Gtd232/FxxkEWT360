@@ -117,7 +117,7 @@ defineProperty error: Cannot redefine property: isTrusted isTrusted: false
 
 
 终于想到了一个elegant的方案!
-遍历react fiber 树用`toClick()`点击 这绕过了`isTrusted`
+遍历react fiber 树用`toCheck()`点击 这绕过了`isTrusted`
 详见代码
 
 

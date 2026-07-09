@@ -103,11 +103,40 @@
     }
 
     document.addEventListener('play', (e) => {
-        if (!settings.autoMute) return;
         if (e.target && e.target.tagName === 'VIDEO') {
-            e.target.volume = 0;
-            e.target.muted = true;
-            console.log("[FxxkEWT360] 检测到视频播放 已自动静音");
+            if (settings.autoMute) {
+                e.target.volume = 0;
+                e.target.muted = true;
+                console.log("[FxxkEWT360] 检测到视频播放 已自动静音");
+            }
+            const el = document.querySelector('#video_player_box') || e.target;
+            if (el) {
+                let fiber = getReactFiber(el);
+                while (fiber) {
+                    if (fiber.stateNode && fiber.stateNode.report) {
+                        const rep = fiber.stateNode.report;
+                        rep.videoRate = targetSpeed;
+                        rep.currentPlayedRate = targetSpeed;
+                        if (rep.start && rep.start.name !== 'dummyStart') {
+                            const originalStart = rep.start;
+                            rep.start = function dummyStart(opts) {
+                                if (opts) {
+                                    opts.videoRate = targetSpeed;
+                                }
+                                return originalStart.call(this, opts);
+                            };
+                        }
+                        if (rep.setVideoRate && rep.setVideoRate.name !== 'dummySetVideoRate') {
+                            const originalSetVideoRate = rep.setVideoRate;
+                            rep.setVideoRate = function dummySetVideoRate(rate) {
+                                return originalSetVideoRate.call(this, targetSpeed);
+                            };
+                        }
+                        break;
+                    }
+                    fiber = fiber.return;
+                }
+            }
         }
     }, true);
 
@@ -264,6 +293,37 @@
                     const p = fiber.stateNode.oEplayer;
                     if (typeof p.checkRate === 'function' && p.checkRate.name !== 'dummyCheckRate') {
                         p.checkRate = function dummyCheckRate() { return false; };
+                    }
+                    if (p._player) {
+                        const bp = p._player.bizPoint();
+                        if (bp && bp.createParams && bp.createParams.name !== 'dummyCreateParams') {
+                            const originalCreateParams = bp.createParams;
+                            bp.createParams = function dummyCreateParams(action, status, stayTime, mediaTime) {
+                                const mult = targetSpeed > 1 ? targetSpeed : 1;
+                                const newStayTime = Math.max(stayTime * mult, mediaTime);
+                                return originalCreateParams.call(this, action, status, newStayTime, mediaTime);
+                            };
+                        }
+                    }
+                    const rep = fiber.stateNode.report;
+                    if (rep) {
+                        rep.videoRate = targetSpeed;
+                        rep.currentPlayedRate = targetSpeed;
+                        if (rep.start && rep.start.name !== 'dummyStart') {
+                            const originalStart = rep.start;
+                            rep.start = function dummyStart(opts) {
+                                if (opts) {
+                                    opts.videoRate = targetSpeed;
+                                }
+                                return originalStart.call(this, opts);
+                            };
+                        }
+                        if (rep.setVideoRate && rep.setVideoRate.name !== 'dummySetVideoRate') {
+                            const originalSetVideoRate = rep.setVideoRate;
+                            rep.setVideoRate = function dummySetVideoRate(rate) {
+                                return originalSetVideoRate.call(this, targetSpeed);
+                            };
+                        }
                     }
                     break;
                 }
