@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FxxkEWT360
 // @namespace    https://github.com/Gtd232/FxxkEWT360
-// @version      4.5
+// @version      4.4
 // @description  逃避升学e网通
 // @author       Gtd232
 // @match        *://*.ewt360.com/*
@@ -60,15 +60,14 @@
     let isSwitching = false;
     let ShuakeFinished = false;
 
-    // ====== 一键完成: 捕获 token 和参数 ======
+    // === 一键完成：捕获 token 和参数 ===
     let capturedToken = null;
     let capturedApiData = {};
 
-    // 拦截 fetch: 仅捕获 gateway.ewt360.com 的 token 和作业数据
     const origFetch = window.fetch;
     window.fetch = function(input, init) {
         const url = typeof input === 'string' ? input : (input && input.url ? input.url : '');
-        const isEwt = url.includes('gateway.ewt360.com') || url.includes('bfe.ewt360.com');
+        const isEwt = /gateway\.ewt360\.com|bfe\.ewt360\.com/.test(url);
         if (isEwt && init && init.headers) {
             let headers = init.headers;
             if (headers instanceof Headers) {
@@ -91,7 +90,6 @@
                             const d = data.data;
                             if (d.finishPlayTime) capturedApiData.finishPlayTime = d.finishPlayTime;
                             if (d.lessonTime) capturedApiData.lessonTime = d.lessonTime;
-                            if (d.percent !== undefined) capturedApiData.percent = d.percent;
                             if (d.schoolId) capturedApiData.schoolId = d.schoolId;
                             if (d.lessonId) capturedApiData.lessonId = d.lessonId;
                         }
@@ -106,12 +104,12 @@
         const hash = window.location.hash || '';
         const qs = hash.split('?')[1] || '';
         const params = new URLSearchParams(qs);
-        const lessonId = params.get('lessonId') || params.get('lessonid') || '';
-        const homeworkId = params.get('homeworkId') || params.get('homeworkid') || '';
-        const vidType = params.get('videoType');
-        const contentType = vidType ? parseInt(vidType) : (capturedApiData.contentType || 0);
-        const schoolId = capturedApiData.schoolId || params.get('schoolId') || '';
-        return { lessonId, homeworkId, contentType, schoolId };
+        return {
+            lessonId: params.get('lessonId') || params.get('lessonid'),
+            homeworkId: params.get('homeworkId') || params.get('homeworkid'),
+            contentType: parseInt(params.get('videoType')) || 11,
+            schoolId: capturedApiData.schoolId || params.get('schoolId') || 21446,
+        };
     }
 
     function quickFinish() {
@@ -122,33 +120,32 @@
         const schoolId = parseInt(p.schoolId) || 0;
 
         if (!lessonId || !homeworkId || isNaN(lessonId) || isNaN(homeworkId)) {
-            console.error("[FxxkEWT360] quickFinish: missing/invalid lessonId or homeworkId", p);
+            console.error("[FxxkEWT360] quickFinish: 缺少 lessonId/homeworkId");
             alert("一键完成失败：无法获取课程参数，请确认已在视频播放页面");
             return;
         }
         if (!schoolId || isNaN(schoolId)) {
-            console.error("[FxxkEWT360] quickFinish: missing schoolId");
+            console.error("[FxxkEWT360] quickFinish: 缺少 schoolId");
             alert("一键完成失败：无法获取学校信息");
             return;
         }
         if (!token) {
-            console.warn("[FxxkEWT360] quickFinish: no token, API上报跳过");
+            console.warn("[FxxkEWT360] quickFinish: 未捕获到 token");
         }
 
         const reportedLessonId = p.contentType === 11 ? lessonId + 2000000 : lessonId;
-        console.log("[FxxkEWT360] quickFinish", {lessonId, homeworkId, schoolId, contentType:p.contentType, hasToken:!!token});
+        console.log("[FxxkEWT360] quickFinish 启动", {lessonId, homeworkId, schoolId, contentType:p.contentType});
 
         if (token) {
             fetch('https://gateway.ewt360.com/api/homeworkprod/homework/student/reportVideoPoint', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json', 'token': token},
-                body: JSON.stringify({schoolId, homeworkId, lessonId:reportedLessonId, type:2, interactivePointId:null, platform:1, seriousCheckResult:0})
-            }).then(r=>r.json()).then(d=>console.log("[FxxkEWT360] reportVideoPoint:",d)).catch(e=>console.error(e));
+                body: JSON.stringify({schoolId, homeworkId, lessonId:reportedLessonId, type:2, interactivePointId:null, platform:1, seriousCheckResult:2})
+            }).then(r=>r.json()).then(d=>console.log("[FxxkEWT360] reportVideoPoint:",d)).catch(e=>console.error("[FxxkEWT360] reportVideoPoint 失败:",e));
         }
         const video = document.querySelector('video');
         if (video && video.duration) {
             video.muted = true;
-            // 跳到 80%（finishPercent），后台认为看完 80% = 已完成
             video.currentTime = video.duration * 0.80;
             video.play().then(() => {
                 if (originalDescriptor) { try { originalDescriptor.set.call(video, 16); } catch(e) {} }
@@ -159,27 +156,55 @@
         if (checkBox) checkBox.style.display = 'none';
     }
 
-    let settings = { autoCheck: true, autoMute: true, playbackSpeed: '1', autoSD: true, autoNext: true, preventPause: true };
+    let settings = {
+        autoCheck: true,
+        autoMute: true,
+        playbackSpeed: '1',
+        autoSD: true,
+        autoNext: true,
+        preventPause: true
+    };
+
     let targetSpeed = 1;
-    const officialSpeeds = [0.8, 1, 1.2, 1.5, 2, 16];
+    const officialSpeeds = [0.8, 1, 1.2, 1.5, 2];
+
     const originalDescriptor = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'playbackRate');
     if (originalDescriptor) {
         Object.defineProperty(HTMLMediaElement.prototype, 'playbackRate', {
-            get: function() { if (Number.isFinite(targetSpeed) && targetSpeed > 0) return targetSpeed; return 1; },
-            set: function(val) { originalDescriptor.set.call(this, targetSpeed); },
+            get: function() {
+                if (officialSpeeds.includes(targetSpeed)) {
+                    return targetSpeed;
+                }
+                return 1;
+            },
+            set: function(val) {
+                originalDescriptor.set.call(this, targetSpeed);
+            },
             configurable: true
         });
     }
+
     try {
         const stored = localStorage.getItem('fxxkewt_settings');
-        if (stored) { settings = {...settings, ...JSON.parse(stored)}; targetSpeed = parseFloat(settings.playbackSpeed) || 1; }
+        if (stored) {
+            settings = { ...settings, ...JSON.parse(stored) };
+            targetSpeed = parseFloat(settings.playbackSpeed) || 1;
+        }
     } catch(e) {}
 
-    function saveSettings() { try { localStorage.setItem('fxxkewt_settings', JSON.stringify(settings)); } catch(e) {} }
+    function saveSettings() {
+        try {
+            localStorage.setItem('fxxkewt_settings', JSON.stringify(settings));
+        } catch(e) {}
+    }
 
     document.addEventListener('play', (e) => {
         if (e.target && e.target.tagName === 'VIDEO') {
-            if (settings.autoMute) { e.target.volume = 0; e.target.muted = true; }
+            if (settings.autoMute) {
+                e.target.volume = 0;
+                e.target.muted = true;
+                console.log("[FxxkEWT360] 检测到视频播放 已自动静音");
+            }
             const el = document.querySelector('#video_player_box') || e.target;
             if (el) {
                 let fiber = getReactFiber(el);
@@ -190,11 +215,18 @@
                         rep.currentPlayedRate = targetSpeed;
                         if (rep.start && rep.start.name !== 'dummyStart') {
                             const originalStart = rep.start;
-                            rep.start = function dummyStart(opts) { if (opts) opts.videoRate = targetSpeed; return originalStart.call(this, opts); };
+                            rep.start = function dummyStart(opts) {
+                                if (opts) {
+                                    opts.videoRate = targetSpeed;
+                                }
+                                return originalStart.call(this, opts);
+                            };
                         }
                         if (rep.setVideoRate && rep.setVideoRate.name !== 'dummySetVideoRate') {
                             const originalSetVideoRate = rep.setVideoRate;
-                            rep.setVideoRate = function dummySetVideoRate(rate) { return originalSetVideoRate.call(this, targetSpeed); };
+                            rep.setVideoRate = function dummySetVideoRate(rate) {
+                                return originalSetVideoRate.call(this, targetSpeed);
+                            };
                         }
                         break;
                     }
@@ -220,29 +252,50 @@
 
     function checkpass() {
         if (!settings.autoCheck) return;
-        const btn = document.querySelector('[data-ac="check-pass"]');
-        if (!btn) return;
-        let fiber = getReactFiber(btn);
-        if (!fiber) { console.error("[FxxkEWT360] no fiber"); return; }
-        let ok = false;
+        const checkpass_btn = document.querySelector('[data-ac="check-pass"]');
+        if (!checkpass_btn) return;
+
+        console.log("[FxxkEWT360] 已定位到按钮", checkpass_btn);
+
+        let fiber = getReactFiber(checkpass_btn);
+        if (!fiber) {
+            console.error("[FxxkEWT360] 未能在该节点上找到 React Fiber 属性");
+            return;
+        }
+
+        let success = false;
         while (fiber) {
             if (fiber.stateNode && typeof fiber.stateNode.toCheck === 'function') {
-                fiber.stateNode.toCheck(); ok = true; break;
+                console.log("[FxxkEWT360] 检测到 Class 组件实例 正在调用 toCheck()");
+                fiber.stateNode.toCheck();
+                success = true;
+                break;
             }
             fiber = fiber.return;
         }
-        console.log("[FxxkEWT360] " + (ok ? "checkpass ok" : "checkpass fail"));
+
+        if (success) {
+            console.log("[FxxkEWT360] 已成功过检");
+        } else {
+            console.error("[FxxkEWT360] 未能找到可调用的 React 接口");
+        }
     }
 
     function selectLesson(el) {
         let fiber = getReactFiber(el);
         if (!fiber) return false;
+
         while (fiber) {
             const props = fiber.memoizedProps;
             if (props) {
                 const funcKey = Object.keys(props).find(k => typeof props[k] === 'function');
                 const lessonKey = Object.keys(props).find(k => props[k] && typeof props[k] === 'object' && (props[k].contentId || props[k].lessonId || props[k].title));
-                if (funcKey && lessonKey) { props[funcKey](props[lessonKey]); return true; }
+                
+                if (funcKey && lessonKey) {
+                    console.log(`[FxxkEWT360] 找到切换课程函数 ${funcKey} 和数据 ${lessonKey} ,执行切换`);
+                    props[funcKey](props[lessonKey]);
+                    return true;
+                }
             }
             fiber = fiber.return;
         }
@@ -251,123 +304,361 @@
 
     function autoPlayNext() {
         if (!settings.autoNext) return;
-        const hasReplay = Array.from(document.querySelectorAll('span, div, button')).some(el => el.textContent.trim() === '重新观看' && el.offsetParent !== null);
+        const spans = Array.from(document.querySelectorAll('span, div, button'));
+        const hasReplay = spans.some(el => el.textContent.trim() === '重新观看' && el.offsetParent !== null);
         const video = document.querySelector('video');
         const isFinished = hasReplay || (video && video.ended);
-        if (!isFinished) { if (isSwitching) isSwitching = false; return; }
+
+        if (!isFinished) {
+            if (isSwitching) {
+                console.log("[FxxkEWT360] 检测到新视频已开始 重置切换标记");
+                isSwitching = false;
+            }
+            return;
+        }
+
         if (isSwitching) return;
+
         const lessons = Array.from(document.querySelectorAll('[data-ac="lesson-item"]'));
         if (lessons.length === 0) return;
+
         const activeIndex = lessons.findIndex(el => el.classList.contains('active-EI2Hl') || el.className.includes('active'));
         if (activeIndex === -1) return;
-        let next = null;
-        for (let i = activeIndex + 1; i < lessons.length; i++) { if (!lessons[i].querySelector('[class*="finished"]')) { next = lessons[i]; break; } }
-        if (!next) { for (let i = 0; i < activeIndex; i++) { if (!lessons[i].querySelector('[class*="finished"]')) { next = lessons[i]; break; } } }
-        if (next) {
+
+        let nextLesson = null;
+
+        for (let i = activeIndex + 1; i < lessons.length; i++) {
+            const isDone = lessons[i].querySelector('[class*="finished"]');
+            if (!isDone) {
+                nextLesson = lessons[i];
+                break;
+            }
+        }
+
+        if (!nextLesson) {
+            for (let i = 0; i < activeIndex; i++) {
+                const isDone = lessons[i].querySelector('[class*="finished"]');
+                if (!isDone) {
+                    nextLesson = lessons[i];
+                    break;
+                }
+            }
+        }
+
+        if (nextLesson) {
             isSwitching = true;
-            console.log("[FxxkEWT360] switching to", next.textContent.trim());
-            if (!selectLesson(next)) isSwitching = false;
+            console.log("[FxxkEWT360] 检测到当前课程已播放完毕 准备自动切换到下一节未完成课程", nextLesson.textContent.trim());
+            const success = selectLesson(nextLesson);
+            if (success) {
+                console.log("[FxxkEWT360] 自动切换下一节课");
+            } else {
+                console.error("[FxxkEWT360] 自动切换下一节课失败 未能成功提取 React 回调");
+                isSwitching = false;
+            }
         } else {
-            if (!ShuakeFinished) { alert("本次刷课已完毕!"); ShuakeFinished = true; }
+            console.log("[FxxkEWT360] 所有课程已播放完毕 未发现未完成的课程");
+            if (!ShuakeFinished) {
+                alert("本次刷课已完毕!")
+                ShuakeFinished = true;
+            }
         }
     }
 
     function setSpeed() {
         targetSpeed = parseFloat(settings.playbackSpeed) || 1;
         const video = document.querySelector('video');
-        if (video) { if (originalDescriptor) { try { originalDescriptor.set.call(video, targetSpeed); } catch(e) {} } if (settings.autoMute) { try { video.volume=0; video.muted=true; } catch(e) {} } }
+        if (video) {
+            if (originalDescriptor) {
+                try {
+                    originalDescriptor.set.call(video, targetSpeed);
+                } catch(e) {}
+            }
+            if (settings.autoMute) {
+                try {
+                    video.volume = 0;
+                    video.muted = true;
+                } catch(e) {}
+            }
+        }
+
         const el = document.querySelector('#video_player_box') || video;
         if (el) {
             let fiber = getReactFiber(el);
             while (fiber) {
                 if (fiber.stateNode && fiber.stateNode.oEplayer) {
                     const p = fiber.stateNode.oEplayer;
-                    if (typeof p.checkRate === 'function' && p.checkRate.name !== 'dummyCheckRate') { p.checkRate = function dummyCheckRate() { return false; }; }
+                    if (typeof p.checkRate === 'function' && p.checkRate.name !== 'dummyCheckRate') {
+                        p.checkRate = function dummyCheckRate() { return false; };
+                    }
                     if (p._player) {
                         const bp = p._player.bizPoint();
                         if (bp && bp.createParams && bp.createParams.name !== 'dummyCreateParams') {
-                            const orig = bp.createParams;
+                            const originalCreateParams = bp.createParams;
                             bp.createParams = function dummyCreateParams(action, status, stayTime, mediaTime) {
                                 const mult = targetSpeed > 1 ? targetSpeed : 1;
-                                return orig.call(this, action, status, Math.max(stayTime * mult, mediaTime));
+                                const newStayTime = Math.max(stayTime * mult, mediaTime);
+                                return originalCreateParams.call(this, action, status, newStayTime, mediaTime);
                             };
                         }
                     }
                     const rep = fiber.stateNode.report;
                     if (rep) {
-                        rep.videoRate = targetSpeed; rep.currentPlayedRate = targetSpeed;
-                        if (rep.start && rep.start.name !== 'dummyStart') { const o=rep.start; rep.start=function dummyStart(opts){if(opts)opts.videoRate=targetSpeed;return o.call(this,opts);}; }
-                        if (rep.setVideoRate && rep.setVideoRate.name !== 'dummySetVideoRate') { const o=rep.setVideoRate; rep.setVideoRate=function dummySetVideoRate(rate){return o.call(this,targetSpeed);}; }
+                        rep.videoRate = targetSpeed;
+                        rep.currentPlayedRate = targetSpeed;
+                        if (rep.start && rep.start.name !== 'dummyStart') {
+                            const originalStart = rep.start;
+                            rep.start = function dummyStart(opts) {
+                                if (opts) {
+                                    opts.videoRate = targetSpeed;
+                                }
+                                return originalStart.call(this, opts);
+                            };
+                        }
+                        if (rep.setVideoRate && rep.setVideoRate.name !== 'dummySetVideoRate') {
+                            const originalSetVideoRate = rep.setVideoRate;
+                            rep.setVideoRate = function dummySetVideoRate(rate) {
+                                return originalSetVideoRate.call(this, targetSpeed);
+                            };
+                        }
                     }
                     break;
                 }
                 fiber = fiber.return;
             }
         }
+
         if (settings.autoSD) {
             const items = Array.from(document.querySelectorAll('.vjs-menu-item'));
-            const sd = items.find(el => { const t=el.querySelector('.vjs-menu-item-text'); return t && t.textContent.trim() === '标清'; });
-            if (sd && !sd.classList.contains('vjs-selected')) sd.click();
+            const sdItem = items.find(el => {
+                const textEl = el.querySelector('.vjs-menu-item-text');
+                return textEl && textEl.textContent.trim() === '标清';
+            });
+            if (sdItem && !sdItem.classList.contains('vjs-selected')) {
+                console.log("[FxxkEWT360] 检测到当前非标清线路 正在自动点击标清按钮");
+                sdItem.click();
+            }
         }
     }
 
     function makeDraggable(el, handle) {
-        let pos1=0,pos2=0,pos3=0,pos4=0;
-        handle.onmousedown = function dragMouseDown(e) {
-            e=e||window.event; if(e.button!==0||e.target.tagName==='A')return; e.preventDefault();
-            pos3=e.clientX;pos4=e.clientY;
-            document.onmouseup=function(){document.onmouseup=null;document.onmousemove=null;try{localStorage.setItem('fxxkewt_panel_pos',JSON.stringify({top:el.style.top,left:el.style.left}));}catch(e){}};
-            document.onmousemove=function(e){e=e||window.event;e.preventDefault();pos1=pos3-e.clientX;pos2=pos4-e.clientY;pos3=e.clientX;pos4=e.clientY;el.style.top=(el.offsetTop-pos2)+"px";el.style.left=(el.offsetLeft-pos1)+"px";el.style.right='auto';};
-        };
+        let pos1 = 0, pos2 = 0, pos3 = 0, pos4 = 0;
+        handle.onmousedown = dragMouseDown;
+
+        function dragMouseDown(e) {
+            e = e || window.event;
+            if (e.button !== 0 || e.target.tagName === 'A') return;
+            e.preventDefault();
+            pos3 = e.clientX;
+            pos4 = e.clientY;
+            document.onmouseup = closeDragElement;
+            document.onmousemove = elementDrag;
+        }
+
+        function elementDrag(e) {
+            e = e || window.event;
+            e.preventDefault();
+            pos1 = pos3 - e.clientX;
+            pos2 = pos4 - e.clientY;
+            pos3 = e.clientX;
+            pos4 = e.clientY;
+            
+            el.style.top = (el.offsetTop - pos2) + "px";
+            el.style.left = (el.offsetLeft - pos1) + "px";
+            el.style.right = 'auto';
+        }
+
+        function closeDragElement() {
+            document.onmouseup = null;
+            document.onmousemove = null;
+            try {
+                localStorage.setItem('fxxkewt_panel_pos', JSON.stringify({ top: el.style.top, left: el.style.left }));
+            } catch(e) {}
+        }
     }
 
     function initPanel() {
         try {
-            if (document.getElementById('fxxkewt-panel') || !document.body) { if(!document.body)setTimeout(initPanel,100); return; }
-            const s = document.createElement('style');
-            s.textContent = '#fxxkewt-panel{position:fixed;top:100px;right:20px;width:200px;background:#eee;border:1px solid #999;color:#000;font-family:sans-serif;font-size:12px;z-index:99999999}#fxxkewt-header{padding:5px;background:#ccc;cursor:move;font-weight:bold;display:flex;justify-content:space-between;user-select:none}#fxxkewt-header a{color:blue;text-decoration:none}#fxxkewt-body{padding:10px}.fxxkewt-row{margin:8px 0;display:flex;justify-content:space-between;align-items:center}.fxxkewt-select{font-size:12px}';
-            (document.head||document.documentElement).appendChild(s);
+            if (document.getElementById('fxxkewt-panel')) return;
+            if (!document.body) {
+                setTimeout(initPanel, 100);
+                return;
+            }
+
+            console.log("[FxxkEWT360] 开始创建设置面板");
+
+            const style = document.createElement('style');
+            style.textContent = `
+                #fxxkewt-panel {
+                    position: fixed;
+                    top: 100px;
+                    right: 20px;
+                    width: 200px;
+                    background: #eee;
+                    border: 1px solid #999;
+                    color: #000;
+                    font-family: sans-serif;
+                    font-size: 12px;
+                    z-index: 99999999;
+                }
+                #fxxkewt-header {
+                    padding: 5px;
+                    background: #ccc;
+                    cursor: move;
+                    font-weight: bold;
+                    display: flex;
+                    justify-content: space-between;
+                    user-select: none;
+                }
+                #fxxkewt-header a {
+                    color: blue;
+                    text-decoration: none;
+                }
+                #fxxkewt-body {
+                    padding: 10px;
+                }
+                .fxxkewt-row {
+                    margin: 8px 0;
+                    display: flex;
+                    justify-content: space-between;
+                    align-items: center;
+                }
+                .fxxkewt-select {
+                    font-size: 12px;
+                }
+            `;
+            (document.head || document.documentElement).appendChild(style);
+
             const panel = document.createElement('div');
             panel.id = 'fxxkewt-panel';
-            try { const pos=localStorage.getItem('fxxkewt_panel_pos'); if(pos){const p=JSON.parse(pos);panel.style.top=p.top||'100px';if(p.left&&p.left!=='auto'){panel.style.left=p.left;panel.style.right='auto';}else{panel.style.right='20px';}}else{panel.style.top='100px';panel.style.right='20px';} } catch(e){panel.style.top='100px';panel.style.right='20px';}
-            panel.innerHTML = '<div id="fxxkewt-header"><span>FxxkEWT360 </span><span style="font-style:italic;">by Gtd232</span><a href="https://github.com/Gtd232/FxxkEWT360" target="_blank">GitHub</a></div><div id="fxxkewt-body">' +
-                '<div class="fxxkewt-row"><span>自动过检</span><input type="checkbox" id="fxxkewt-autoCheck" '+(settings.autoCheck?'checked':'')+'></div>' +
-                '<div class="fxxkewt-row"><span>自动静音</span><input type="checkbox" id="fxxkewt-autoMute" '+(settings.autoMute?'checked':'')+'></div>' +
-                '<div class="fxxkewt-row"><span>自动标清</span><input type="checkbox" id="fxxkewt-autoSD" '+(settings.autoSD?'checked':'')+'></div>' +
-                '<div class="fxxkewt-row"><span>自动连播</span><input type="checkbox" id="fxxkewt-autoNext" '+(settings.autoNext?'checked':'')+'></div>' +
-                '<div class="fxxkewt-row"><span>禁止暂停</span><input type="checkbox" id="fxxkewt-preventPause" '+(settings.preventPause?'checked':'')+'></div>' +
-                '<div class="fxxkewt-row"><span>倍速选择</span><select class="fxxkewt-select" id="fxxkewt-speed">' +
-                '<option value="0.8"'+(settings.playbackSpeed==='0.8'?' selected':'')+'>0.8X</option>' +
-                '<option value="1"'+(settings.playbackSpeed==='1'?' selected':'')+'>1.0X</option>' +
-                '<option value="1.2"'+(settings.playbackSpeed==='1.2'?' selected':'')+'>1.2X</option>' +
-                '<option value="1.5"'+(settings.playbackSpeed==='1.5'?' selected':'')+'>1.5X</option>' +
-                '<option value="2"'+(settings.playbackSpeed==='2'?' selected':'')+'>2.0X</option>' +
-                '<option value="4"'+(settings.playbackSpeed==='4'?' selected':'')+'>4.0X</option>' +
-                '<option value="8"'+(settings.playbackSpeed==='8'?' selected':'')+'>8.0X</option>' +
-                '<option value="16"'+(settings.playbackSpeed==='16'?' selected':'')+'>16.0X</option></select></div>' +
-                '<div style="font-size:10px;color:#666;margin-top:10px;border-top:1px dashed #ccc;padding-top:5px;line-height:1.3;">不建议开启倍速播放, 这会使得在统计时实际看课时长缩短</div>' +
-                '<div style="margin-top:10px;border-top:1px dashed #ccc;padding-top:6px;">' +
-                '<div id="fxxkewt-tools-toggle" style="font-size:11px;color:#888;cursor:pointer;text-align:center;user-select:none;">[+] !!!终极方案!!!</div>' +
-                '<div id="fxxkewt-tools-extra" style="display:none;margin-top:6px;">' +
-                '<div style="font-size:10px;color:#c00;line-height:1.4;margin-bottom:6px;padding:4px;background:#fff0f0;border-radius:2px;">[!] 一键完成会直接上报通过、拖进度条到末尾，可能被后台发现异常，仅在需要时使用</div>' +
-                '<button id="fxxkewt-quickfinish" style="width:100%;padding:4px 0;background:#ddd;color:#333;border:1px solid #bbb;border-radius:2px;cursor:pointer;font-size:11px;">一键完成当前视频</button></div></div></div>';
+            
+            try {
+                const pos = localStorage.getItem('fxxkewt_panel_pos');
+                if (pos) {
+                    const parsed = JSON.parse(pos);
+                    panel.style.top = parsed.top || '100px';
+                    if (parsed.left && parsed.left !== 'auto') {
+                        panel.style.left = parsed.left;
+                        panel.style.right = 'auto';
+                    } else {
+                        panel.style.right = '20px';
+                    }
+                } else {
+                    panel.style.top = '100px';
+                    panel.style.right = '20px';
+                }
+            } catch(e) {
+                panel.style.top = '100px';
+                panel.style.right = '20px';
+            }
+
+            panel.innerHTML = `
+                <div id="fxxkewt-header">
+                    <span>FxxkEWT360 </span><span style="font-style: italic;">by Gtd232</span>
+                    <a href="https://github.com/Gtd232/FxxkEWT360" target="_blank">GitHub</a>
+                </div>
+                <div id="fxxkewt-body">
+                    <div class="fxxkewt-row">
+                        <span>自动过检</span>
+                        <input type="checkbox" id="fxxkewt-autoCheck" ${settings.autoCheck ? 'checked' : ''}>
+                    </div>
+                    <div class="fxxkewt-row">
+                        <span>自动静音</span>
+                        <input type="checkbox" id="fxxkewt-autoMute" ${settings.autoMute ? 'checked' : ''}>
+                    </div>
+                    <div class="fxxkewt-row">
+                        <span>自动标清</span>
+                        <input type="checkbox" id="fxxkewt-autoSD" ${settings.autoSD ? 'checked' : ''}>
+                    </div>
+                    <div class="fxxkewt-row">
+                        <span>自动连播</span>
+                        <input type="checkbox" id="fxxkewt-autoNext" ${settings.autoNext ? 'checked' : ''}>
+                    </div>
+                    <div class="fxxkewt-row">
+                        <span>禁止暂停</span>
+                        <input type="checkbox" id="fxxkewt-preventPause" ${settings.preventPause ? 'checked' : ''}>
+                    </div>
+                    <div class="fxxkewt-row">
+                        <span>倍速选择</span>
+                        <select class="fxxkewt-select" id="fxxkewt-speed">
+                            <option value="0.8" ${settings.playbackSpeed === '0.8' ? 'selected' : ''}>0.8X</option>
+                            <option value="1" ${settings.playbackSpeed === '1' ? 'selected' : ''}>1.0X</option>
+                            <option value="1.2" ${settings.playbackSpeed === '1.2' ? 'selected' : ''}>1.2X</option>
+                            <option value="1.5" ${settings.playbackSpeed === '1.5' ? 'selected' : ''}>1.5X</option>
+                            <option value="2" ${settings.playbackSpeed === '2' ? 'selected' : ''}>2.0X</option>
+                            <option value="4" ${settings.playbackSpeed === '4' ? 'selected' : ''}>4.0X</option>
+                            <option value="8" ${settings.playbackSpeed === '8' ? 'selected' : ''}>8.0X</option>
+                        </select>
+                    </div>
+                    <div style="font-size: 10px; color: #666; margin-top: 10px; border-top: 1px dashed #ccc; padding-top: 5px; line-height: 1.3;">
+                        不建议开启倍速播放, 这会使得在统计时实际看课时长缩短
+                    </div>
+                    <div style="margin-top: 10px; border-top: 1px dashed #ccc; padding-top: 6px;">
+                        <div id="fxxkewt-tools-toggle" style="font-size:11px;color:#888;cursor:pointer;text-align:center;user-select:none;">[+] 更多工具</div>
+                        <div id="fxxkewt-tools-extra" style="display:none;margin-top:6px;">
+                            <div style="font-size:10px;color:#c00;line-height:1.4;margin-bottom:6px;padding:4px;background:#fff0f0;border-radius:2px;">
+                                一键完成会上报通过检测并跳到80%进度，可能被后台发现异常
+                            </div>
+                            <button id="fxxkewt-quickfinish" style="width:100%;padding:4px 0;background:#ddd;color:#333;border:1px solid #bbb;border-radius:2px;cursor:pointer;font-size:11px;">
+                                一键完成当前视频
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            `;
             document.body.appendChild(panel);
-            panel.querySelector('#fxxkewt-autoCheck').onchange=e=>{settings.autoCheck=e.target.checked;saveSettings();};
-            panel.querySelector('#fxxkewt-autoMute').onchange=e=>{settings.autoMute=e.target.checked;saveSettings();};
-            panel.querySelector('#fxxkewt-autoSD').onchange=e=>{settings.autoSD=e.target.checked;saveSettings();setSpeed();};
-            panel.querySelector('#fxxkewt-autoNext').onchange=e=>{settings.autoNext=e.target.checked;saveSettings();};
-            panel.querySelector('#fxxkewt-preventPause').onchange=e=>{settings.preventPause=e.target.checked;saveSettings();};
-            panel.querySelector('#fxxkewt-speed').onchange=e=>{settings.playbackSpeed=e.target.value;saveSettings();setSpeed();};
-            makeDraggable(panel, panel.querySelector('#fxxkewt-header'));
-            panel.querySelector('#fxxkewt-tools-toggle').onclick=()=>{
-                const e=document.getElementById('fxxkewt-tools-extra'),t=document.getElementById('fxxkewt-tools-toggle');
-                if(e.style.display==='none'){e.style.display='block';t.textContent='[-] !!!终极方案!!!';}else{e.style.display='none';t.textContent='[+] !!!终极方案!!!';}
+
+            panel.querySelector('#fxxkewt-autoCheck').onchange = (e) => {
+                settings.autoCheck = e.target.checked;
+                saveSettings();
             };
-            panel.querySelector('#fxxkewt-quickfinish').onclick=quickFinish;
-            console.log("[FxxkEWT360] panel ok");
-        } catch(e) { console.error("[FxxkEWT360] panel err", e); }
+            panel.querySelector('#fxxkewt-autoMute').onchange = (e) => {
+                settings.autoMute = e.target.checked;
+                saveSettings();
+            };
+            panel.querySelector('#fxxkewt-autoSD').onchange = (e) => {
+                settings.autoSD = e.target.checked;
+                saveSettings();
+                setSpeed();
+            };
+            panel.querySelector('#fxxkewt-autoNext').onchange = (e) => {
+                settings.autoNext = e.target.checked;
+                saveSettings();
+            };
+            panel.querySelector('#fxxkewt-preventPause').onchange = (e) => {
+                settings.preventPause = e.target.checked;
+                saveSettings();
+            };
+            panel.querySelector('#fxxkewt-speed').onchange = (e) => {
+                settings.playbackSpeed = e.target.value;
+                saveSettings();
+                setSpeed();
+            };
+
+            // 更多工具折叠切换
+            panel.querySelector('#fxxkewt-tools-toggle').onclick = () => {
+                const extra = document.getElementById('fxxkewt-tools-extra');
+                const toggle = document.getElementById('fxxkewt-tools-toggle');
+                if (extra.style.display === 'none') {
+                    extra.style.display = 'block';
+                    toggle.textContent = '[-] 更多工具';
+                } else {
+                    extra.style.display = 'none';
+                    toggle.textContent = '[+] 更多工具';
+                }
+            };
+            panel.querySelector('#fxxkewt-quickfinish').onclick = quickFinish;
+
+            makeDraggable(panel, panel.querySelector('#fxxkewt-header'));
+            console.log("[FxxkEWT360] 设置面板创建成功");
+        } catch(e) {
+            console.error("[FxxkEWT360] initPanel 发生异常", e);
+        }
     }
 
     setTimeout(initPanel, 100);
-    setInterval(() => { checkpass(); autoPlayNext(); setSpeed(); }, 2000);
+    setInterval(() => {
+        checkpass();
+        autoPlayNext();
+        setSpeed();
+    }, 2000);
 })();
