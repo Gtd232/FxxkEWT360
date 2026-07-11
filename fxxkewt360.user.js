@@ -148,7 +148,8 @@
         const video = document.querySelector('video');
         if (video && video.duration) {
             video.muted = true;
-            video.currentTime = video.duration * 0.99;
+            // 跳到 80%（finishPercent），后台认为看完 80% = 已完成
+            video.currentTime = video.duration * 0.80;
             video.play().then(() => {
                 if (originalDescriptor) { try { originalDescriptor.set.call(video, 16); } catch(e) {} }
                 video.playbackRate = 16;
