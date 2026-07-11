@@ -60,6 +60,130 @@
     let isSwitching = false;
     let ShuakeFinished = false;
 
+    // ====== 一键完成: 捕获 token 和参数 ======
+    let capturedToken = null;
+    let capturedApiData = {};
+
+    // 拦截 fetch 捕获 token 和 API 返回数据
+    const origFetch = window.fetch;
+    window.fetch = function(input, init) {
+        // 从请求头捕获 token
+        if (init && init.headers) {
+            let headers = init.headers;
+            if (headers instanceof Headers) {
+                let t = headers.get('token');
+                if (t) capturedToken = t;
+            } else if (typeof headers === 'object' && !Array.isArray(headers)) {
+                let t = headers['token'] || headers['Token'];
+                if (t) capturedToken = t;
+            }
+        } else if (typeof input === 'string' && init === undefined) {
+            // fetch(url) 没有 init 参数，跳过
+        }
+        return origFetch.apply(this, arguments).then(response => {
+            const ct = response.headers.get('content-type') || '';
+            if (ct.includes('json')) {
+                const clone = response.clone();
+                clone.text().then(text => {
+                    try {
+                        const data = JSON.parse(text);
+                        if (data && data.data) {
+                            const d = data.data;
+                            if (d.finishPlayTime) capturedApiData.finishPlayTime = d.finishPlayTime;
+                            if (d.lessonTime) capturedApiData.lessonTime = d.lessonTime;
+                            if (d.percent !== undefined) capturedApiData.percent = d.percent;
+                            if (d.schoolId) capturedApiData.schoolId = d.schoolId;
+                            if (d.lessonId) capturedApiData.lessonId = d.lessonId;
+                        }
+                    } catch(e) {}
+                }).catch(() => {});
+            }
+            return response;
+        });
+    };
+
+    function getPageParams() {
+        const hash = window.location.hash || '';
+        const qs = hash.split('?')[1] || '';
+        const params = new URLSearchParams(qs);
+        return {
+            lessonId: params.get('lessonId') || params.get('lessonid'),
+            homeworkId: params.get('homeworkId') || params.get('homeworkid'),
+            contentType: parseInt(params.get('videoType')) || 11,
+            schoolId: capturedApiData.schoolId || params.get('schoolId') || 21446,
+        };
+    }
+
+    function quickFinish() {
+        const p = getPageParams();
+        const token = capturedToken;
+
+        if (!token) {
+            // 尝试从 localStorage 或其他地方拿 token
+            console.warn("[FxxkEWT360] ⚠ 未捕获到 token，尝试从页面数据获取...");
+        }
+
+        const reportedLessonId = p.contentType === 11 ? parseInt(p.lessonId) + 2000000 : parseInt(p.lessonId);
+        const schoolId = parseInt(p.schoolId);
+
+        console.log("[FxxkEWT360] 🚀 一键完成启动", {
+            lessonId: p.lessonId, homeworkId: p.homeworkId,
+            reportedLessonId, schoolId, contentType: p.contentType,
+            hasToken: !!token
+        });
+
+        // 1. 上报认真检测通过（如果弹窗存在）
+        if (token) {
+            fetch('https://gateway.ewt360.com/api/homeworkprod/homework/student/reportVideoPoint', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json', 'token': token},
+                body: JSON.stringify({
+                    schoolId: schoolId,
+                    homeworkId: parseInt(p.homeworkId),
+                    lessonId: reportedLessonId,
+                    type: 2,
+                    interactivePointId: null,
+                    platform: 1,
+                    seriousCheckResult: 0
+                })
+            }).then(r => r.json()).then(d => {
+                console.log("[FxxkEWT360] ✅ 认真检测上报结果:", d);
+            }).catch(e => {
+                console.error("[FxxkEWT360] ❌ 认真检测上报失败:", e);
+            });
+        }
+
+        // 2. 把视频拖到末尾并快速播放触发完成
+        const video = document.querySelector('video');
+        if (video && video.duration) {
+            console.log(`[FxxkEWT360] 视频总长: ${Math.round(video.duration)}s，跳转到 99%`);
+            video.muted = true;
+            video.currentTime = video.duration * 0.99;
+            video.play().then(() => {
+                // 设超高倍速快速播完
+                if (originalDescriptor) {
+                    try { originalDescriptor.set.call(video, 16); } catch(e) {}
+                }
+                video.playbackRate = 16;
+                // 监听播完
+                video.addEventListener('ended', function onEnd() {
+                    video.removeEventListener('ended', onEnd);
+                    console.log("[FxxkEWT360] ✅ 视频播放完毕，等待自动连播...");
+                }, {once: true});
+            });
+            // 如果播放被暂停则恢复
+            video.addEventListener('pause', function onPause() {
+                if (!video.ended) video.play().catch(() => {});
+            }, {once: true});
+        } else {
+            console.warn("[FxxkEWT360] 未找到 video 元素或视频尚未加载");
+        }
+
+        // 3. 尝试隐藏可能存在的认真检测弹窗
+        const checkBox = document.querySelector('[class*="video_earnest_check"]');
+        if (checkBox) checkBox.style.display = 'none';
+    }
+
     let settings = {
         autoCheck: true,
         autoMute: true,
@@ -493,6 +617,11 @@
                     <div style="font-size: 10px; color: #666; margin-top: 10px; border-top: 1px dashed #ccc; padding-top: 5px; line-height: 1.3;">
                         不建议开启倍速播放, 这会使得在统计时实际看课时长缩短
                     </div>
+                    <div style="margin-top: 12px; border-top: 2px solid #c00; padding-top: 8px;">
+                        <button id="fxxkewt-quickfinish" style="width:100%;padding:6px 0;background:#c00;color:#fff;border:none;border-radius:3px;cursor:pointer;font-weight:bold;font-size:13px;">
+                            🚀 一键完成当前视频
+                        </button>
+                    </div>
                 </div>
             `;
             document.body.appendChild(panel);
@@ -525,6 +654,8 @@
             };
 
             makeDraggable(panel, panel.querySelector('#fxxkewt-header'));
+
+            panel.querySelector('#fxxkewt-quickfinish').onclick = quickFinish;
             console.log("[FxxkEWT360] 设置面板创建成功");
         } catch(e) {
             console.error("[FxxkEWT360] initPanel 发生异常", e);
