@@ -70,7 +70,7 @@
     };
 
     let targetSpeed = 1;
-    const officialSpeeds = [0.8, 1, 1.2, 1.5, 2, 4, 8, 16];
+    const officialSpeeds = [0.8, 1, 1.2, 1.5, 2, 16];
 
     const originalDescriptor = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'playbackRate');
     if (originalDescriptor) {
