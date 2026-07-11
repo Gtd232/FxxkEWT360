@@ -70,12 +70,16 @@
     };
 
     let targetSpeed = 1;
+    const officialSpeeds = [0.8, 1, 1.2, 1.5, 2, 4, 8, 16];
 
     const originalDescriptor = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'playbackRate');
     if (originalDescriptor) {
         Object.defineProperty(HTMLMediaElement.prototype, 'playbackRate', {
             get: function() {
-                return targetSpeed;
+                if (Number.isFinite(targetSpeed) && targetSpeed > 0) {
+                    return targetSpeed;
+                }
+                return 1;
             },
             set: function(val) {
                 originalDescriptor.set.call(this, targetSpeed);
@@ -487,7 +491,7 @@
                             <option value="2" ${settings.playbackSpeed === '2' ? 'selected' : ''}>2.0X</option>
                             <option value="4" ${settings.playbackSpeed === '4' ? 'selected' : ''}>4.0X</option>
                             <option value="8" ${settings.playbackSpeed === '8' ? 'selected' : ''}>8.0X</option>
-                            <option value="16" ${settings.playbackSpeed === '16' ? 'selected' : ''}>16X</option>
+                            <option value="16" ${settings.playbackSpeed === '16' ? 'selected' : ''}>16.0X</option>
                         </select>
                     </div>
                     <div style="font-size: 10px; color: #666; margin-top: 10px; border-top: 1px dashed #ccc; padding-top: 5px; line-height: 1.3;">
