@@ -621,10 +621,16 @@
                     <div style="font-size: 10px; color: #666; margin-top: 10px; border-top: 1px dashed #ccc; padding-top: 5px; line-height: 1.3;">
                         不建议开启倍速播放, 这会使得在统计时实际看课时长缩短
                     </div>
-                    <div style="margin-top: 12px; border-top: 2px solid #c00; padding-top: 8px;">
-                        <button id="fxxkewt-quickfinish" style="width:100%;padding:6px 0;background:#c00;color:#fff;border:none;border-radius:3px;cursor:pointer;font-weight:bold;font-size:13px;">
-                            🚀 一键完成当前视频
-                        </button>
+                    <div style="margin-top: 10px; border-top: 1px dashed #ccc; padding-top: 6px;">
+                        <div id="fxxkewt-tools-toggle" style="font-size:11px;color:#888;cursor:pointer;text-align:center;user-select:none;">[+] 更多工具</div>
+                        <div id="fxxkewt-tools-extra" style="display:none;margin-top:6px;">
+                            <div style="font-size:10px;color:#c00;line-height:1.4;margin-bottom:6px;padding:4px;background:#fff0f0;border-radius:2px;">
+                                [!] 一键完成会直接上报通过、拖进度条到末尾，可能被后台发现异常，仅在需要时使用
+                            </div>
+                            <button id="fxxkewt-quickfinish" style="width:100%;padding:4px 0;background:#ddd;color:#333;border:1px solid #bbb;border-radius:2px;cursor:pointer;font-size:11px;">
+                                一键完成当前视频
+                            </button>
+                        </div>
                     </div>
                 </div>
             `;
@@ -659,6 +665,18 @@
 
             makeDraggable(panel, panel.querySelector('#fxxkewt-header'));
 
+            // 更多工具折叠切换
+            panel.querySelector('#fxxkewt-tools-toggle').onclick = () => {
+                const extra = document.getElementById('fxxkewt-tools-extra');
+                const toggle = document.getElementById('fxxkewt-tools-toggle');
+                if (extra.style.display === 'none') {
+                    extra.style.display = 'block';
+                    toggle.textContent = '[-] 更多工具';
+                } else {
+                    extra.style.display = 'none';
+                    toggle.textContent = '[+] 更多工具';
+                }
+            };
             panel.querySelector('#fxxkewt-quickfinish').onclick = quickFinish;
             console.log("[FxxkEWT360] 设置面板创建成功");
         } catch(e) {
