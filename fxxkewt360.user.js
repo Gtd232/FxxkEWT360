@@ -62,20 +62,24 @@
     let quickFinishRunning = false;
     let checkPassPromise = null;
 
-    const BIZ_POINT_PLAYING = 2;
-    const BIZ_POINT_WATCH = 1;
-
     let settings = {
         autoCheck: true,
         autoMute: true,
         playbackSpeed: '1',
         autoSD: true,
         autoNext: true,
-        preventPause: true
+        preventPause: true,
+        accelerateWatchTime: false,
+        quickFinishWatchTime: false
     };
 
     let targetSpeed = 1;
     const officialSpeeds = [0.8, 1, 1.2, 1.5, 2];
+    const FIRST_RUN_NOTICE_KEY = 'fxxkewt_first_run_notice_shown';
+    const patchedBizPoints = new WeakSet();
+    const quickFinishBizPointReports = new WeakSet();
+    const BIZ_POINT_PLAYING = 2;
+    const BIZ_POINT_WATCH = 1;
 
     const originalDescriptor = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'playbackRate');
     if (originalDescriptor) {
@@ -105,6 +109,45 @@
         try {
             localStorage.setItem('fxxkewt_settings', JSON.stringify(settings));
         } catch(e) {}
+    }
+
+    function showFirstRunNotice() {
+        try {
+            if (localStorage.getItem(FIRST_RUN_NOTICE_KEY) === '1') return;
+            localStorage.setItem(FIRST_RUN_NOTICE_KEY, '1');
+        } catch(e) {
+            console.error('[FxxkEWT360] 无法保存首次运行标记', e);
+        }
+
+        alert([
+            'FxxkEWT360 使用注意事项',
+            '',
+            '1. 使用“一键完成”前，请先播放当前视频，等待页面原生上报组件初始化。',
+            '2. 一键完成会直接触发当前课程的页面原生上报，请刷新页面确认结果。',
+            '3. 开启倍速后若不勾选"倍速同步看课时长", 可能会导致实际看课时长大幅变短，这在后台会有体现; 即使勾选了也请慎用倍速功能。',
+            '',
+            'Made with ❤️ by Gtd232',
+            'GitHub：https://github.com/Gtd232/FxxkEWT360'
+        ].join('\n'));
+    }
+
+    function patchWatchTimeReporter(bizPoint) {
+        if (!bizPoint || typeof bizPoint.createParams !== 'function' || patchedBizPoints.has(bizPoint)) return;
+
+        const originalCreateParams = bizPoint.createParams;
+        bizPoint.createParams = function patchedCreateParams(action, status, stayTime, mediaTime) {
+            const physicalDuration = Number(stayTime);
+            const mediaDuration = Number(mediaTime);
+            const shouldAccelerate = quickFinishBizPointReports.has(bizPoint)
+                ? settings.quickFinishWatchTime
+                : settings.accelerateWatchTime;
+            const reportedStayTime = shouldAccelerate &&
+                Number.isFinite(physicalDuration) && Number.isFinite(mediaDuration)
+                ? Math.max(physicalDuration, mediaDuration)
+                : stayTime;
+            return originalCreateParams.call(this, action, status, reportedStayTime, mediaTime);
+        };
+        patchedBizPoints.add(bizPoint);
     }
 
     function syncReportSpeed(rep) {
@@ -181,9 +224,9 @@
     }
 
     function getNativeProgress(reporter) {
-        const duration = reporter.videoDuration;
-        const requiredDuration = reporter.videoDurationLimit;
-        let playedDuration = reporter.videoPlayedDuration;
+        const duration = Number(reporter.videoDuration);
+        const requiredDuration = Number(reporter.videoDurationLimit);
+        let playedDuration = Number(reporter.videoPlayedDuration);
 
         if (typeof reporter.calcTime === 'function') {
             const progress = reporter.calcTime();
@@ -212,30 +255,31 @@
         };
     }
 
-    function getSchoolVideoProgressReporter(component, reporter) {
+    function getBizPointContext(component, reporter) {
         const player = component.oEplayer;
         const internalPlayer = player && player._player;
-        if (!player || !internalPlayer ||
-            typeof internalPlayer.bizPoint !== 'function' ||
+        if (!player || !internalPlayer || typeof internalPlayer.bizPoint !== 'function' ||
             (typeof internalPlayer.usingPlugin === 'function' && !internalPlayer.usingPlugin('bizPoint'))) {
-            throw new Error('校本视频原生进度组件尚未就绪');
+            throw new Error('页面原生看课时长组件尚未就绪');
         }
 
         const bizPoint = internalPlayer.bizPoint();
         const options = bizPoint && bizPoint._options;
-        if (!bizPoint || typeof bizPoint.upload !== 'function' ||
-            !options || Number(options.videoType) !== 6 ||
-            String(options.videoBizCode) !== '1014' ||
+        const isSchoolVideo = reporter.isXBvideo === true;
+        if (!bizPoint || typeof bizPoint.upload !== 'function' || !options ||
+            Number(options.videoType) !== (isSchoolVideo ? 6 : 1) ||
+            String(options.videoBizCode) !== (isSchoolVideo ? '1014' : '1013') ||
             Number(options.lessonId) !== Number(reporter.lessonId)) {
-            throw new Error('校本视频原生进度上下文无效');
+            throw new Error('页面原生看课时长上下文无效');
         }
         if (bizPoint._isFirstPlayStatus !== BIZ_POINT_PLAYING) {
-            throw new Error('请先开始播放当前校本视频');
+            throw new Error('请先开始播放当前视频');
         }
         if (typeof player.getPosition !== 'function' || typeof player.seek !== 'function') {
-            throw new Error('校本视频播放器接口不完整');
+            throw new Error('页面原生播放器接口不完整');
         }
 
+        patchWatchTimeReporter(bizPoint);
         return { player, bizPoint };
     }
 
@@ -246,30 +290,24 @@
         }
 
         const reporter = component.report;
-        const progress = getNativeProgress(reporter);
+        const isSchoolVideo = reporter.isXBvideo === true;
+        if (!isSchoolVideo && reporter.reportEnabled !== true) {
+            throw new Error('页面原生进度上报未启用或尚未就绪');
+        }
+
         const context = {
             component,
             reporter,
             homeworkId: Number(reporter.homeworkId),
             lessonId: Number(reporter.lessonId),
-            ...progress
+            mode: isSchoolVideo ? 'school' : 'compensation',
+            ...getNativeProgress(reporter)
         };
 
-        if (reporter.isXBvideo === true) {
-            return {
-                ...context,
-                mode: 'school',
-                ...getSchoolVideoProgressReporter(component, reporter)
-            };
+        if (isSchoolVideo || settings.quickFinishWatchTime) {
+            Object.assign(context, getBizPointContext(component, reporter));
         }
-        if (reporter.reportEnabled !== true) {
-            throw new Error('页面原生进度上报未启用或尚未就绪');
-        }
-
-        return {
-            ...context,
-            mode: 'compensation'
-        };
+        return context;
     }
 
     function assertSameReportContext(before, after) {
@@ -280,32 +318,6 @@
             before.bizPoint !== after.bizPoint) {
             throw new Error('等待期间课程已切换，请重新操作');
         }
-    }
-
-    async function reportSchoolVideoProgress(context) {
-        const { player, bizPoint, duration, playedDuration, target } = context;
-        const reportedDuration = target - playedDuration;
-        if (reportedDuration <= 0) return false;
-
-        const currentPosition = Number(player.getPosition()) * 1000;
-        if (!Number.isFinite(currentPosition) || currentPosition < 0) {
-            throw new Error('校本视频播放位置无效');
-        }
-
-        // Keep BizPoint's point_time_id consistent with the reported media interval.
-        const finishPosition = currentPosition + reportedDuration <= duration
-            ? currentPosition + reportedDuration
-            : reportedDuration;
-        player.seek(finishPosition / 1000);
-
-        // The native plugin adds its server-provided context and signature.
-        await bizPoint.upload(
-            BIZ_POINT_PLAYING,
-            BIZ_POINT_WATCH,
-            reportedDuration,
-            reportedDuration
-        );
-        return true;
     }
 
     function executeCheckPass(component) {
@@ -324,6 +336,34 @@
         if (!component && !checkPassPromise) return false;
 
         await (checkPassPromise || executeCheckPass(component));
+        return true;
+    }
+
+    async function uploadQuickFinishProgress(context) {
+        const { player, bizPoint, playedDuration, target } = context;
+        const reportedDuration = target - playedDuration;
+        if (reportedDuration <= 0) return false;
+
+        const currentPosition = Number(player.getPosition());
+        if (!Number.isFinite(currentPosition) || currentPosition < 0) {
+            throw new Error('页面原生播放位置无效');
+        }
+
+        player.seek(target / 1000);
+
+        let uploadPromise;
+        quickFinishBizPointReports.add(bizPoint);
+        try {
+            uploadPromise = bizPoint.upload(
+                BIZ_POINT_PLAYING,
+                BIZ_POINT_WATCH,
+                0,
+                reportedDuration
+            );
+        } finally {
+            quickFinishBizPointReports.delete(bizPoint);
+        }
+        await uploadPromise;
         return true;
     }
 
@@ -347,7 +387,7 @@
             const { reporter, target, mode } = reportContext;
             let reportTriggered = true;
             if (mode === 'school') {
-                reportTriggered = await reportSchoolVideoProgress(reportContext);
+                reportTriggered = await uploadQuickFinishProgress(reportContext);
             } else {
                 const reportPromise = reporter.report(target);
                 reporter.reportEnabled = false;
@@ -356,13 +396,17 @@
                     reporter.timeInterval = null;
                 }
                 await reportPromise;
+                if (settings.quickFinishWatchTime) {
+                    await uploadQuickFinishProgress(reportContext);
+                }
             }
 
             console.log('[FxxkEWT360] 已触发页面原生进度上报', {
                 lessonId: reporter.lessonId,
                 homeworkId: reporter.homeworkId,
                 mode,
-                target
+                target,
+                watchTimeSynced: settings.quickFinishWatchTime
             });
             alert(reportTriggered
                 ? '已触发页面原生进度上报，请稍后刷新进度确认'
@@ -498,19 +542,12 @@
             if (typeof p.checkRate === 'function' && p.checkRate.name !== 'dummyCheckRate') {
                 p.checkRate = function dummyCheckRate() { return false; };
             }
-            if (p._player) {
-                const bp = p._player.bizPoint();
-                if (bp && bp.createParams && bp.createParams.name !== 'dummyCreateParams') {
-                    const originalCreateParams = bp.createParams;
-                    bp.createParams = function dummyCreateParams(action, status, stayTime, mediaTime) {
-                        const mult = targetSpeed > 1 ? targetSpeed : 1;
-                        const newStayTime = Math.max(stayTime * mult, mediaTime);
-                        return originalCreateParams.call(this, action, status, newStayTime, mediaTime);
-                    };
-                }
+            const internalPlayer = p._player;
+            if (internalPlayer && typeof internalPlayer.bizPoint === 'function' &&
+                (typeof internalPlayer.usingPlugin !== 'function' || internalPlayer.usingPlugin('bizPoint'))) {
+                patchWatchTimeReporter(internalPlayer.bizPoint());
             }
-            const rep = component.report;
-            syncReportSpeed(rep);
+            syncReportSpeed(component.report);
         }
 
         if (settings.autoSD) {
@@ -611,6 +648,42 @@
                 .fxxkewt-select {
                     font-size: 12px;
                 }
+                #fxxkewt-more-toggle {
+                    width: 100%;
+                    padding: 6px 0;
+                    border: 0;
+                    border-top: 1px solid #bbb;
+                    background: transparent;
+                    color: #333;
+                    font-size: 12px;
+                    text-align: left;
+                    cursor: pointer;
+                }
+                #fxxkewt-more-toggle span {
+                    float: right;
+                }
+                #fxxkewt-more-tools[hidden] {
+                    display: none;
+                }
+                #fxxkewt-quickfinish {
+                    width: 100%;
+                    padding: 6px;
+                    border: 1px solid #888;
+                    background: #ddd;
+                    color: #000;
+                    font-size: 12px;
+                    cursor: pointer;
+                }
+                #fxxkewt-quickfinish:disabled {
+                    cursor: wait;
+                    opacity: 0.65;
+                }
+                .fxxkewt-warning {
+                    margin-top: 6px;
+                    color: #a33;
+                    font-size: 10px;
+                    line-height: 1.4;
+                }
             `;
             (document.head || document.documentElement).appendChild(style);
 
@@ -673,21 +746,23 @@
                             <option value="2" ${settings.playbackSpeed === '2' ? 'selected' : ''}>2.0X</option>
                             <option value="4" ${settings.playbackSpeed === '4' ? 'selected' : ''}>4.0X</option>
                             <option value="8" ${settings.playbackSpeed === '8' ? 'selected' : ''}>8.0X</option>
+                            <option value="16" ${settings.playbackSpeed === '16' ? 'selected' : ''}>16.0X</option>
                         </select>
                     </div>
-                    <div style="font-size: 10px; color: #666; margin-top: 10px; border-top: 1px dashed #ccc; padding-top: 5px; line-height: 1.3;">
-                        不建议开启倍速播放, 这会使得在统计时实际看课时长缩短
-                    </div>
-                    <div style="margin-top: 10px; border-top: 1px dashed #ccc; padding-top: 6px;">
-                        <div id="fxxkewt-tools-toggle" style="font-size:11px;color:#888;cursor:pointer;text-align:center;user-select:none;">[+] 更多工具</div>
-                        <div id="fxxkewt-tools-extra" style="display:none;margin-top:6px;">
-                            <div style="font-size:10px;color:#c00;line-height:1.4;margin-bottom:6px;padding:4px;background:#fff0f0;border-radius:2px;">
-                                该操作可能被后台发现异常
-                            </div>
-                            <button id="fxxkewt-quickfinish" style="width:100%;padding:4px 0;background:#ddd;color:#333;border:1px solid #bbb;border-radius:2px;cursor:pointer;font-size:11px;">
-                                一键完成当前视频
-                            </button>
+                    <button type="button" id="fxxkewt-more-toggle" aria-expanded="false">
+                        更多工具<span>+</span>
+                    </button>
+                    <div id="fxxkewt-more-tools" hidden>
+                        <div class="fxxkewt-row">
+                            <span>倍速同步看课时长(测试)</span>
+                            <input type="checkbox" id="fxxkewt-accelerateWatchTime" ${settings.accelerateWatchTime ? 'checked' : ''}>
                         </div>
+                        <div class="fxxkewt-row">
+                            <span>一键完成同步看课时长(测试)</span>
+                            <input type="checkbox" id="fxxkewt-quickFinishWatchTime" ${settings.quickFinishWatchTime ? 'checked' : ''}>
+                        </div>
+                        <button type="button" id="fxxkewt-quickfinish">一键完成当前视频</button>
+                        <div class="fxxkewt-warning">直接触发当前课程的页面原生上报，请刷新页面确认结果。<br>开启倍速后若不勾选"倍速同步看课时长", 可能会导致实际看课时长变短，这在后台会有体现; 即使勾选了也请慎用倍速功能。</div>
                     </div>
                 </div>
             `;
@@ -719,23 +794,29 @@
                 saveSettings();
                 setSpeed();
             };
+            panel.querySelector('#fxxkewt-accelerateWatchTime').onchange = (e) => {
+                settings.accelerateWatchTime = e.target.checked;
+                saveSettings();
+                setSpeed();
+            };
+            panel.querySelector('#fxxkewt-quickFinishWatchTime').onchange = (e) => {
+                settings.quickFinishWatchTime = e.target.checked;
+                saveSettings();
+            };
 
-            // 更多工具折叠切换
-            panel.querySelector('#fxxkewt-tools-toggle').onclick = () => {
-                const extra = document.getElementById('fxxkewt-tools-extra');
-                const toggle = document.getElementById('fxxkewt-tools-toggle');
-                if (extra.style.display === 'none') {
-                    extra.style.display = 'block';
-                    toggle.textContent = '[-] 更多工具';
-                } else {
-                    extra.style.display = 'none';
-                    toggle.textContent = '[+] 更多工具';
-                }
+            const moreToggle = panel.querySelector('#fxxkewt-more-toggle');
+            const moreTools = panel.querySelector('#fxxkewt-more-tools');
+            moreToggle.onclick = () => {
+                const expanded = moreToggle.getAttribute('aria-expanded') !== 'true';
+                moreToggle.setAttribute('aria-expanded', String(expanded));
+                moreToggle.querySelector('span').textContent = expanded ? '-' : '+';
+                moreTools.hidden = !expanded;
             };
             panel.querySelector('#fxxkewt-quickfinish').onclick = quickFinish;
 
             makeDraggable(panel, panel.querySelector('#fxxkewt-header'));
             console.log("[FxxkEWT360] 设置面板创建成功");
+            showFirstRunNotice();
         } catch(e) {
             console.error("[FxxkEWT360] initPanel 发生异常", e);
         }
