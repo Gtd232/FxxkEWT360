@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FxxkEWT360
 // @namespace    https://github.com/Gtd232/FxxkEWT360
-// @version      4.5
+// @version      4.6
 // @description  逃避升学e网通
 // @author       Gtd232
 // @match        *://*.ewt360.com/*
@@ -75,7 +75,8 @@
 
     let targetSpeed = 1;
     const officialSpeeds = [0.8, 1, 1.2, 1.5, 2];
-    const FIRST_RUN_NOTICE_KEY = 'fxxkewt_first_run_notice_shown';
+    const PAGE_STAY_EVENT = '$$_page_stay';
+    const PAGE_STAY_TRIGGER = 'scroll';
     const patchedBizPoints = new WeakSet();
     const quickFinishBizPointReports = new WeakSet();
     const BIZ_POINT_PLAYING = 2;
@@ -112,23 +113,40 @@
     }
 
     function showFirstRunNotice() {
-        try {
-            if (localStorage.getItem(FIRST_RUN_NOTICE_KEY) === '1') return;
-            localStorage.setItem(FIRST_RUN_NOTICE_KEY, '1');
-        } catch(e) {
-            console.error('[FxxkEWT360] 无法保存首次运行标记', e);
-        }
+        if (localStorage.getItem('fxxkewt_first_run_notice_shown') === '1') return;
+        localStorage.setItem('fxxkewt_first_run_notice_shown', '1');
 
         alert([
             'FxxkEWT360 使用注意事项',
             '',
-            '1. 使用“一键完成”前，请先播放当前视频，等待页面原生上报组件初始化。',
-            '2. 一键完成会直接触发当前课程的页面原生上报，请刷新页面确认结果。',
-            '3. 开启倍速后若不勾选"倍速同步看课时长", 可能会导致实际看课时长大幅变短，这在后台会有体现; 即使勾选了也请慎用倍速功能。',
+            '1. 使用"一键完成"前，请先播放当前视频，等待页面原生上报组件初始化。一键完成会直接触发当前课程的页面原生上报，请刷新页面确认结果。',
+            '2. 开启倍速后若不勾选"倍速同步看课时长", 可能会导致实际看课时长大幅变短，这在后台会有体现; 即使勾选了也请慎用倍速功能。',
+            '3. 请谨慎使用处于测试状态的功能，这些功能可能不会按照预期工作。',
             '',
             'Made with ❤️ by Gtd232',
+            'Contributors: Gtd232, Alan6234(34LiuNian)',
             'GitHub：https://github.com/Gtd232/FxxkEWT360'
         ].join('\n'));
+    }
+
+    function reportUsageTimeCompensation(duration) {
+        const reportedDuration = Math.round(Number(duration));
+        if (!Number.isFinite(reportedDuration) || reportedDuration <= 0) return;
+
+        const properties = {
+            duration: reportedDuration,
+            triggerTiming: PAGE_STAY_TRIGGER
+        };
+        if (window.aplus && typeof window.aplus.record === 'function') {
+            window.aplus.record(PAGE_STAY_EVENT, 'OTHER', properties);
+            return;
+        }
+
+        window.aplus_queue = window.aplus_queue || [];
+        window.aplus_queue.push({
+            action: 'aplus.record',
+            arguments: [PAGE_STAY_EVENT, 'OTHER', properties]
+        });
     }
 
     function patchWatchTimeReporter(bizPoint) {
@@ -145,6 +163,9 @@
                 Number.isFinite(physicalDuration) && Number.isFinite(mediaDuration)
                 ? Math.max(physicalDuration, mediaDuration)
                 : stayTime;
+            if (shouldAccelerate && Number.isFinite(physicalDuration)) {
+                reportUsageTimeCompensation(Number(reportedStayTime) - physicalDuration);
+            }
             return originalCreateParams.call(this, action, status, reportedStayTime, mediaTime);
         };
         patchedBizPoints.add(bizPoint);
@@ -721,20 +742,8 @@
                         <input type="checkbox" id="fxxkewt-autoCheck" ${settings.autoCheck ? 'checked' : ''}>
                     </div>
                     <div class="fxxkewt-row">
-                        <span>自动静音</span>
-                        <input type="checkbox" id="fxxkewt-autoMute" ${settings.autoMute ? 'checked' : ''}>
-                    </div>
-                    <div class="fxxkewt-row">
-                        <span>自动标清</span>
-                        <input type="checkbox" id="fxxkewt-autoSD" ${settings.autoSD ? 'checked' : ''}>
-                    </div>
-                    <div class="fxxkewt-row">
                         <span>自动连播</span>
                         <input type="checkbox" id="fxxkewt-autoNext" ${settings.autoNext ? 'checked' : ''}>
-                    </div>
-                    <div class="fxxkewt-row">
-                        <span>禁止暂停</span>
-                        <input type="checkbox" id="fxxkewt-preventPause" ${settings.preventPause ? 'checked' : ''}>
                     </div>
                     <div class="fxxkewt-row">
                         <span>倍速选择</span>
@@ -754,6 +763,18 @@
                     </button>
                     <div id="fxxkewt-more-tools" hidden>
                         <div class="fxxkewt-row">
+                            <span>自动静音</span>
+                            <input type="checkbox" id="fxxkewt-autoMute" ${settings.autoMute ? 'checked' : ''}>
+                        </div>
+                        <div class="fxxkewt-row">
+                            <span>自动标清</span>
+                            <input type="checkbox" id="fxxkewt-autoSD" ${settings.autoSD ? 'checked' : ''}>
+                        </div>
+                        <div class="fxxkewt-row">
+                            <span>禁止暂停</span>
+                            <input type="checkbox" id="fxxkewt-preventPause" ${settings.preventPause ? 'checked' : ''}>
+                        </div>
+                        <div class="fxxkewt-row">
                             <span>倍速同步看课时长(测试)</span>
                             <input type="checkbox" id="fxxkewt-accelerateWatchTime" ${settings.accelerateWatchTime ? 'checked' : ''}>
                         </div>
@@ -761,8 +782,14 @@
                             <span>一键完成同步看课时长(测试)</span>
                             <input type="checkbox" id="fxxkewt-quickFinishWatchTime" ${settings.quickFinishWatchTime ? 'checked' : ''}>
                         </div>
-                        <button type="button" id="fxxkewt-quickfinish">一键完成当前视频</button>
-                        <div class="fxxkewt-warning">直接触发当前课程的页面原生上报，请刷新页面确认结果。<br>开启倍速后若不勾选"倍速同步看课时长", 可能会导致实际看课时长变短，这在后台会有体现; 即使勾选了也请慎用倍速功能。</div>
+                        <button type="button" id="fxxkewt-quickfinish">一键完成当前视频(测试)</button>
+                        <div class="fxxkewt-warning">
+                        直接触发当前课程的页面原生上报，请刷新页面确认结果。
+                        <br>
+                        开启倍速后若不勾选"倍速同步看课时长", 可能会导致实际看课时长变短，这在后台会有体现; 即使勾选了也请慎用倍速功能。
+                        <br>
+                        慎用测试功能，测试功能可能会未按预期工作。
+                        </div>
                     </div>
                 </div>
             `;
