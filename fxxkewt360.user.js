@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FxxkEWT360
 // @namespace    https://github.com/Gtd232/FxxkEWT360
-// @version      4.4
+// @version      4.5
 // @description  逃避升学e网通
 // @author       Gtd232
 // @match        *://*.ewt360.com/*
@@ -59,102 +59,11 @@
 
     let isSwitching = false;
     let ShuakeFinished = false;
+    let quickFinishRunning = false;
+    let checkPassPromise = null;
 
-    // === 一键完成：捕获 token 和参数 ===
-    let capturedToken = null;
-    let capturedApiData = {};
-
-    const origFetch = window.fetch;
-    window.fetch = function(input, init) {
-        const url = typeof input === 'string' ? input : (input && input.url ? input.url : '');
-        const isEwt = /gateway\.ewt360\.com|bfe\.ewt360\.com/.test(url);
-        if (isEwt && init && init.headers) {
-            let headers = init.headers;
-            if (headers instanceof Headers) {
-                let t = headers.get('token');
-                if (t) capturedToken = t;
-            } else if (typeof headers === 'object' && !Array.isArray(headers)) {
-                let t = headers['token'] || headers['Token'];
-                if (t) capturedToken = t;
-            }
-        }
-        return origFetch.apply(this, arguments).then(response => {
-            if (!isEwt) return response;
-            const ct = response.headers.get('content-type') || '';
-            if (ct.includes('json')) {
-                const clone = response.clone();
-                clone.text().then(text => {
-                    try {
-                        const data = JSON.parse(text);
-                        if (data && data.data) {
-                            const d = data.data;
-                            if (d.finishPlayTime) capturedApiData.finishPlayTime = d.finishPlayTime;
-                            if (d.lessonTime) capturedApiData.lessonTime = d.lessonTime;
-                            if (d.schoolId) capturedApiData.schoolId = d.schoolId;
-                            if (d.lessonId) capturedApiData.lessonId = d.lessonId;
-                        }
-                    } catch(e) {}
-                }).catch(() => {});
-            }
-            return response;
-        });
-    };
-
-    function getPageParams() {
-        const hash = window.location.hash || '';
-        const qs = hash.split('?')[1] || '';
-        const params = new URLSearchParams(qs);
-        return {
-            lessonId: params.get('lessonId') || params.get('lessonid'),
-            homeworkId: params.get('homeworkId') || params.get('homeworkid'),
-            contentType: parseInt(params.get('videoType')) || 11,
-            schoolId: capturedApiData.schoolId || params.get('schoolId') || 21446,
-        };
-    }
-
-    function quickFinish() {
-        const p = getPageParams();
-        const token = capturedToken;
-        const lessonId = parseInt(p.lessonId);
-        const homeworkId = parseInt(p.homeworkId);
-        const schoolId = parseInt(p.schoolId) || 0;
-
-        if (!lessonId || !homeworkId || isNaN(lessonId) || isNaN(homeworkId)) {
-            console.error("[FxxkEWT360] quickFinish: 缺少 lessonId/homeworkId");
-            alert("一键完成失败：无法获取课程参数，请确认已在视频播放页面");
-            return;
-        }
-        if (!schoolId || isNaN(schoolId)) {
-            console.error("[FxxkEWT360] quickFinish: 缺少 schoolId");
-            alert("一键完成失败：无法获取学校信息");
-            return;
-        }
-        if (!token) {
-            console.warn("[FxxkEWT360] quickFinish: 未捕获到 token");
-        }
-
-        const reportedLessonId = p.contentType === 11 ? lessonId + 2000000 : lessonId;
-        console.log("[FxxkEWT360] quickFinish 启动", {lessonId, homeworkId, schoolId, contentType:p.contentType});
-
-        if (token) {
-            fetch('https://gateway.ewt360.com/api/homeworkprod/homework/student/reportVideoPoint', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json', 'token': token},
-                body: JSON.stringify({schoolId, homeworkId, lessonId:reportedLessonId, type:2, interactivePointId:null, platform:1, seriousCheckResult:2})
-            }).then(r=>r.json()).then(d=>console.log("[FxxkEWT360] reportVideoPoint:",d)).catch(e=>console.error("[FxxkEWT360] reportVideoPoint 失败:",e));
-        }
-        const video = document.querySelector('video');
-        if (video && video.duration) {
-            video.muted = true;
-            video.currentTime = video.duration * 0.80;
-            video.play().then(() => {
-                if (originalDescriptor) { try { originalDescriptor.set.call(video, 16); } catch(e) {} }
-                video.playbackRate = 16;
-            });
-        }
-        const checkBox = document.querySelector('[class*="video_earnest_check"]');
-        if (checkBox) checkBox.style.display = 'none';
-    }
+    const BIZ_POINT_PLAYING = 2;
+    const BIZ_POINT_WATCH = 1;
 
     let settings = {
         autoCheck: true,
@@ -198,6 +107,28 @@
         } catch(e) {}
     }
 
+    function syncReportSpeed(rep) {
+        if (!rep) return;
+
+        rep.videoRate = targetSpeed;
+        rep.currentPlayedRate = targetSpeed;
+        if (rep.start && rep.start.name !== 'dummyStart') {
+            const originalStart = rep.start;
+            rep.start = function dummyStart(opts) {
+                if (opts) {
+                    opts.videoRate = targetSpeed;
+                }
+                return originalStart.call(this, opts);
+            };
+        }
+        if (rep.setVideoRate && rep.setVideoRate.name !== 'dummySetVideoRate') {
+            const originalSetVideoRate = rep.setVideoRate;
+            rep.setVideoRate = function dummySetVideoRate(rate) {
+                return originalSetVideoRate.call(this, targetSpeed);
+            };
+        }
+    }
+
     document.addEventListener('play', (e) => {
         if (e.target && e.target.tagName === 'VIDEO') {
             if (settings.autoMute) {
@@ -206,32 +137,9 @@
                 console.log("[FxxkEWT360] 检测到视频播放 已自动静音");
             }
             const el = document.querySelector('#video_player_box') || e.target;
-            if (el) {
-                let fiber = getReactFiber(el);
-                while (fiber) {
-                    if (fiber.stateNode && fiber.stateNode.report) {
-                        const rep = fiber.stateNode.report;
-                        rep.videoRate = targetSpeed;
-                        rep.currentPlayedRate = targetSpeed;
-                        if (rep.start && rep.start.name !== 'dummyStart') {
-                            const originalStart = rep.start;
-                            rep.start = function dummyStart(opts) {
-                                if (opts) {
-                                    opts.videoRate = targetSpeed;
-                                }
-                                return originalStart.call(this, opts);
-                            };
-                        }
-                        if (rep.setVideoRate && rep.setVideoRate.name !== 'dummySetVideoRate') {
-                            const originalSetVideoRate = rep.setVideoRate;
-                            rep.setVideoRate = function dummySetVideoRate(rate) {
-                                return originalSetVideoRate.call(this, targetSpeed);
-                            };
-                        }
-                        break;
-                    }
-                    fiber = fiber.return;
-                }
+            const component = findReactStateNode(el, node => node.report);
+            if (component) {
+                syncReportSpeed(component.report);
             }
         }
     }, true);
@@ -250,35 +158,237 @@
         return key ? el[key] : null;
     }
 
-    function checkpass() {
-        if (!settings.autoCheck) return;
-        const checkpass_btn = document.querySelector('[data-ac="check-pass"]');
-        if (!checkpass_btn) return;
-
-        console.log("[FxxkEWT360] 已定位到按钮", checkpass_btn);
-
-        let fiber = getReactFiber(checkpass_btn);
-        if (!fiber) {
-            console.error("[FxxkEWT360] 未能在该节点上找到 React Fiber 属性");
-            return;
-        }
-
-        let success = false;
+    function findReactStateNode(el, predicate) {
+        let fiber = getReactFiber(el);
         while (fiber) {
-            if (fiber.stateNode && typeof fiber.stateNode.toCheck === 'function') {
-                console.log("[FxxkEWT360] 检测到 Class 组件实例 正在调用 toCheck()");
-                fiber.stateNode.toCheck();
-                success = true;
-                break;
+            if (fiber.stateNode && predicate(fiber.stateNode)) {
+                return fiber.stateNode;
             }
             fiber = fiber.return;
         }
+        return null;
+    }
 
-        if (success) {
-            console.log("[FxxkEWT360] 已成功过检");
-        } else {
-            console.error("[FxxkEWT360] 未能找到可调用的 React 接口");
+    function getPlayerComponent() {
+        const video = document.querySelector('video');
+        const el = document.querySelector('#video_player_box') || video;
+        return findReactStateNode(el, node => node.report && typeof node.report.report === 'function');
+    }
+
+    function getActiveCheckComponent() {
+        const button = document.querySelector('[data-ac="check-pass"]');
+        return button ? findReactStateNode(button, node => typeof node.toCheck === 'function') : null;
+    }
+
+    function getNativeProgress(reporter) {
+        const duration = reporter.videoDuration;
+        const requiredDuration = reporter.videoDurationLimit;
+        let playedDuration = reporter.videoPlayedDuration;
+
+        if (typeof reporter.calcTime === 'function') {
+            const progress = reporter.calcTime();
+            if (progress && Number.isFinite(progress.timeTotal)) {
+                playedDuration = Math.max(playedDuration, progress.timeTotal);
+            }
         }
+
+        if (!Number.isFinite(duration) || duration <= 0 ||
+            !Number.isFinite(requiredDuration) || requiredDuration <= 0 ||
+            !Number.isFinite(playedDuration) || playedDuration < 0) {
+            throw new Error('页面原生进度数据尚未就绪');
+        }
+
+        const homeworkId = Number(reporter.homeworkId);
+        const lessonId = Number(reporter.lessonId);
+        if (!Number.isFinite(homeworkId) || homeworkId <= 0 ||
+            !Number.isFinite(lessonId) || lessonId <= 0) {
+            throw new Error('页面原生课程上下文无效');
+        }
+
+        return {
+            duration,
+            playedDuration,
+            target: Math.min(duration, Math.max(playedDuration, requiredDuration))
+        };
+    }
+
+    function getSchoolVideoProgressReporter(component, reporter) {
+        const player = component.oEplayer;
+        const internalPlayer = player && player._player;
+        if (!player || !internalPlayer ||
+            typeof internalPlayer.bizPoint !== 'function' ||
+            (typeof internalPlayer.usingPlugin === 'function' && !internalPlayer.usingPlugin('bizPoint'))) {
+            throw new Error('校本视频原生进度组件尚未就绪');
+        }
+
+        const bizPoint = internalPlayer.bizPoint();
+        const options = bizPoint && bizPoint._options;
+        if (!bizPoint || typeof bizPoint.upload !== 'function' ||
+            !options || Number(options.videoType) !== 6 ||
+            String(options.videoBizCode) !== '1014' ||
+            Number(options.lessonId) !== Number(reporter.lessonId)) {
+            throw new Error('校本视频原生进度上下文无效');
+        }
+        if (bizPoint._isFirstPlayStatus !== BIZ_POINT_PLAYING) {
+            throw new Error('请先开始播放当前校本视频');
+        }
+        if (typeof player.getPosition !== 'function' || typeof player.seek !== 'function') {
+            throw new Error('校本视频播放器接口不完整');
+        }
+
+        return { player, bizPoint };
+    }
+
+    function getReadyQuickFinishContext() {
+        const component = getPlayerComponent();
+        if (!component) {
+            throw new Error('无法定位页面原生进度组件');
+        }
+
+        const reporter = component.report;
+        const progress = getNativeProgress(reporter);
+        const context = {
+            component,
+            reporter,
+            homeworkId: Number(reporter.homeworkId),
+            lessonId: Number(reporter.lessonId),
+            ...progress
+        };
+
+        if (reporter.isXBvideo === true) {
+            return {
+                ...context,
+                mode: 'school',
+                ...getSchoolVideoProgressReporter(component, reporter)
+            };
+        }
+        if (reporter.reportEnabled !== true) {
+            throw new Error('页面原生进度上报未启用或尚未就绪');
+        }
+
+        return {
+            ...context,
+            mode: 'compensation'
+        };
+    }
+
+    function assertSameReportContext(before, after) {
+        if (before.reporter !== after.reporter ||
+            before.homeworkId !== after.homeworkId ||
+            before.lessonId !== after.lessonId ||
+            before.mode !== after.mode ||
+            before.bizPoint !== after.bizPoint) {
+            throw new Error('等待期间课程已切换，请重新操作');
+        }
+    }
+
+    async function reportSchoolVideoProgress(context) {
+        const { player, bizPoint, duration, playedDuration, target } = context;
+        const reportedDuration = target - playedDuration;
+        if (reportedDuration <= 0) return false;
+
+        const currentPosition = Number(player.getPosition()) * 1000;
+        if (!Number.isFinite(currentPosition) || currentPosition < 0) {
+            throw new Error('校本视频播放位置无效');
+        }
+
+        // Keep BizPoint's point_time_id consistent with the reported media interval.
+        const finishPosition = currentPosition + reportedDuration <= duration
+            ? currentPosition + reportedDuration
+            : reportedDuration;
+        player.seek(finishPosition / 1000);
+
+        // The native plugin adds its server-provided context and signature.
+        await bizPoint.upload(
+            BIZ_POINT_PLAYING,
+            BIZ_POINT_WATCH,
+            reportedDuration,
+            reportedDuration
+        );
+        return true;
+    }
+
+    function executeCheckPass(component) {
+        if (!checkPassPromise) {
+            checkPassPromise = Promise.resolve()
+                .then(() => component.toCheck())
+                .finally(() => {
+                    checkPassPromise = null;
+                });
+        }
+        return checkPassPromise;
+    }
+
+    async function passActiveCheck() {
+        const component = getActiveCheckComponent();
+        if (!component && !checkPassPromise) return false;
+
+        await (checkPassPromise || executeCheckPass(component));
+        return true;
+    }
+
+    async function quickFinish() {
+        if (quickFinishRunning) return;
+
+        const button = document.getElementById('fxxkewt-quickfinish');
+        const originalText = button ? button.textContent : '';
+        quickFinishRunning = true;
+        if (button) {
+            button.disabled = true;
+            button.textContent = '处理中...';
+        }
+
+        try {
+            const initialContext = getReadyQuickFinishContext();
+            await passActiveCheck();
+            const reportContext = getReadyQuickFinishContext();
+            assertSameReportContext(initialContext, reportContext);
+
+            const { reporter, target, mode } = reportContext;
+            let reportTriggered = true;
+            if (mode === 'school') {
+                reportTriggered = await reportSchoolVideoProgress(reportContext);
+            } else {
+                const reportPromise = reporter.report(target);
+                reporter.reportEnabled = false;
+                if (reporter.timeInterval) {
+                    clearInterval(reporter.timeInterval);
+                    reporter.timeInterval = null;
+                }
+                await reportPromise;
+            }
+
+            console.log('[FxxkEWT360] 已触发页面原生进度上报', {
+                lessonId: reporter.lessonId,
+                homeworkId: reporter.homeworkId,
+                mode,
+                target
+            });
+            alert(reportTriggered
+                ? '已触发页面原生进度上报，请稍后刷新进度确认'
+                : '页面原生进度已达到完成阈值，请刷新进度确认');
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            console.error('[FxxkEWT360] 一键完成失败', error);
+            alert(`一键完成失败：${message}`);
+        } finally {
+            quickFinishRunning = false;
+            if (button) {
+                button.disabled = false;
+                button.textContent = originalText;
+            }
+        }
+    }
+
+    function checkpass() {
+        if (!settings.autoCheck || quickFinishRunning || checkPassPromise) return;
+        const component = getActiveCheckComponent();
+        if (!component) return;
+
+        console.log("[FxxkEWT360] 检测到认真度检查 正在调用页面原生接口");
+        executeCheckPass(component).catch(error => {
+            console.error("[FxxkEWT360] 页面原生过检失败", error);
+        });
     }
 
     function selectLesson(el) {
@@ -382,49 +492,25 @@
         }
 
         const el = document.querySelector('#video_player_box') || video;
-        if (el) {
-            let fiber = getReactFiber(el);
-            while (fiber) {
-                if (fiber.stateNode && fiber.stateNode.oEplayer) {
-                    const p = fiber.stateNode.oEplayer;
-                    if (typeof p.checkRate === 'function' && p.checkRate.name !== 'dummyCheckRate') {
-                        p.checkRate = function dummyCheckRate() { return false; };
-                    }
-                    if (p._player) {
-                        const bp = p._player.bizPoint();
-                        if (bp && bp.createParams && bp.createParams.name !== 'dummyCreateParams') {
-                            const originalCreateParams = bp.createParams;
-                            bp.createParams = function dummyCreateParams(action, status, stayTime, mediaTime) {
-                                const mult = targetSpeed > 1 ? targetSpeed : 1;
-                                const newStayTime = Math.max(stayTime * mult, mediaTime);
-                                return originalCreateParams.call(this, action, status, newStayTime, mediaTime);
-                            };
-                        }
-                    }
-                    const rep = fiber.stateNode.report;
-                    if (rep) {
-                        rep.videoRate = targetSpeed;
-                        rep.currentPlayedRate = targetSpeed;
-                        if (rep.start && rep.start.name !== 'dummyStart') {
-                            const originalStart = rep.start;
-                            rep.start = function dummyStart(opts) {
-                                if (opts) {
-                                    opts.videoRate = targetSpeed;
-                                }
-                                return originalStart.call(this, opts);
-                            };
-                        }
-                        if (rep.setVideoRate && rep.setVideoRate.name !== 'dummySetVideoRate') {
-                            const originalSetVideoRate = rep.setVideoRate;
-                            rep.setVideoRate = function dummySetVideoRate(rate) {
-                                return originalSetVideoRate.call(this, targetSpeed);
-                            };
-                        }
-                    }
-                    break;
-                }
-                fiber = fiber.return;
+        const component = findReactStateNode(el, node => node.oEplayer);
+        if (component) {
+            const p = component.oEplayer;
+            if (typeof p.checkRate === 'function' && p.checkRate.name !== 'dummyCheckRate') {
+                p.checkRate = function dummyCheckRate() { return false; };
             }
+            if (p._player) {
+                const bp = p._player.bizPoint();
+                if (bp && bp.createParams && bp.createParams.name !== 'dummyCreateParams') {
+                    const originalCreateParams = bp.createParams;
+                    bp.createParams = function dummyCreateParams(action, status, stayTime, mediaTime) {
+                        const mult = targetSpeed > 1 ? targetSpeed : 1;
+                        const newStayTime = Math.max(stayTime * mult, mediaTime);
+                        return originalCreateParams.call(this, action, status, newStayTime, mediaTime);
+                    };
+                }
+            }
+            const rep = component.report;
+            syncReportSpeed(rep);
         }
 
         if (settings.autoSD) {
@@ -596,7 +682,7 @@
                         <div id="fxxkewt-tools-toggle" style="font-size:11px;color:#888;cursor:pointer;text-align:center;user-select:none;">[+] 更多工具</div>
                         <div id="fxxkewt-tools-extra" style="display:none;margin-top:6px;">
                             <div style="font-size:10px;color:#c00;line-height:1.4;margin-bottom:6px;padding:4px;background:#fff0f0;border-radius:2px;">
-                                一键完成会上报通过检测并跳到80%进度，可能被后台发现异常
+                                该操作可能被后台发现异常
                             </div>
                             <button id="fxxkewt-quickfinish" style="width:100%;padding:4px 0;background:#ddd;color:#333;border:1px solid #bbb;border-radius:2px;cursor:pointer;font-size:11px;">
                                 一键完成当前视频
