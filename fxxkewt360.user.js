@@ -78,8 +78,7 @@
         autoSD: true,
         autoNext: true,
         preventPause: true,
-        accelerateWatchTime: false,
-        quickFinishWatchTime: false
+        accelerateWatchTime: false
     };
 
     let targetSpeed = 1;
@@ -88,8 +87,13 @@
     const PAGE_STAY_TRIGGER = 'scroll';
     const patchedBizPoints = new WeakSet();
     const quickFinishBizPointReports = new WeakSet();
+    const quickFinishPointTimeOverrides = new WeakMap();
     const BIZ_POINT_PLAYING = 2;
     const BIZ_POINT_WATCH = 1;
+    const BIZ_POINT_NORMAL_SPEED = 1;
+    const BIZ_POINT_MAX_SEGMENT_MS = 60000;
+    const STUDY_RECORD_SUBMIT_URL = 'https://gateway.ewt360.com/api/studyprod/course/lesson/record/submit';
+    const PLAYBACK_PROGRESS_URL = 'https://bfe.ewt360.com/video/playbackProgress';
 
     const originalDescriptor = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'playbackRate');
     if (originalDescriptor) {
@@ -1029,7 +1033,7 @@
         alert([
             'FxxkEWT360 使用注意事项',
             '',
-            '1. 使用"一键完成"前，请先播放当前视频，等待页面原生上报组件初始化。一键完成会直接触发当前课程的页面原生上报，请刷新页面确认结果。',
+            '1. 使用"一键完成"前，请先播放当前视频，等待页面原生上报组件初始化。一键完成会提交当前课程完成记录并触发页面原生进度上报，请刷新页面确认结果。',
             '2. 开启倍速后若不勾选"倍速同步看课时长", 可能会导致实际看课时长大幅变短，这在后台会有体现; 即使勾选了也请慎用倍速功能。',
             '3. 请谨慎使用处于测试状态的功能，这些功能可能不会按照预期工作。',
             '',
@@ -1066,19 +1070,170 @@
         bizPoint.createParams = function patchedCreateParams(action, status, stayTime, mediaTime) {
             const physicalDuration = Number(stayTime);
             const mediaDuration = Number(mediaTime);
-            const shouldAccelerate = quickFinishBizPointReports.has(bizPoint)
-                ? settings.quickFinishWatchTime
-                : settings.accelerateWatchTime;
-            const reportedStayTime = shouldAccelerate &&
-            Number.isFinite(physicalDuration) && Number.isFinite(mediaDuration)
-                ? Math.max(physicalDuration, mediaDuration)
-                : stayTime;
+            const isQuickFinishReport = quickFinishBizPointReports.has(bizPoint);
+            const shouldAccelerate = isQuickFinishReport || settings.accelerateWatchTime;
+            let reportedStayTime = stayTime;
+            if (isQuickFinishReport && Number.isFinite(mediaDuration)) {
+                reportedStayTime = mediaDuration;
+            } else if (shouldAccelerate &&
+                Number.isFinite(physicalDuration) && Number.isFinite(mediaDuration)) {
+                reportedStayTime = Math.max(physicalDuration, mediaDuration);
+            }
             if (shouldAccelerate && Number.isFinite(physicalDuration)) {
                 reportUsageTimeCompensation(Number(reportedStayTime) - physicalDuration);
             }
-            return originalCreateParams.call(this, action, status, reportedStayTime, mediaTime);
+            const params = originalCreateParams.call(this, action, status, reportedStayTime, mediaTime);
+            const virtualPointTime = quickFinishPointTimeOverrides.get(bizPoint);
+            const eventPackage = params && params.EventPackage && params.EventPackage[0];
+            if (eventPackage && quickFinishBizPointReports.has(bizPoint)) {
+                eventPackage.speed = BIZ_POINT_NORMAL_SPEED;
+            }
+            if (eventPackage && Number.isFinite(virtualPointTime) && virtualPointTime > 0) {
+                const pointTime = Number(eventPackage.point_time);
+                if (Number.isFinite(pointTime) && pointTime > 0) {
+                    eventPackage.point_time_id = Math.max(1, Math.ceil(virtualPointTime / pointTime));
+                }
+            }
+            return params;
         };
         patchedBizPoints.add(bizPoint);
+    }
+
+    function readCookie(name) {
+        const escapedName = String(name).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const match = document.cookie.match(new RegExp(`(?:^|;\\s*)${escapedName}=([^;]*)`));
+        return match ? decodeURIComponent(match[1]) : '';
+    }
+
+    function getStorageItem(storage, key) {
+        try {
+            return storage && storage.getItem(key) || '';
+        } catch (error) {
+            return '';
+        }
+    }
+
+    function getLocationParam(name) {
+        try {
+            const searchValue = new URLSearchParams(window.location.search).get(name);
+            if (searchValue) return searchValue;
+
+            const hash = window.location.hash || '';
+            const queryStart = hash.indexOf('?');
+            if (queryStart >= 0) {
+                return new URLSearchParams(hash.slice(queryStart + 1)).get(name) || '';
+            }
+        } catch (error) {
+            return '';
+        }
+        return '';
+    }
+
+    function normalizeTokenCandidate(value) {
+        let token = String(value || '').trim();
+        if (!token) return '';
+
+        if (token.includes('tk=')) {
+            try {
+                const query = token.includes('?') ? token.slice(token.indexOf('?') + 1) : token;
+                token = new URLSearchParams(query).get('tk') || token;
+            } catch (error) {
+                return token;
+            }
+        }
+        return token;
+    }
+
+    function getCurrentUserId() {
+        const tokenCandidates = [
+            readCookie('token'),
+            readCookie('ewt_user'),
+            readCookie('user'),
+            getStorageItem(window.sessionStorage, 'token'),
+            getStorageItem(window.localStorage, 'token'),
+            getLocationParam('token'),
+            getLocationParam('tk')
+        ];
+
+        for (const candidate of tokenCandidates) {
+            const token = normalizeTokenCandidate(candidate);
+            const userId = Number(token.split('-')[0]);
+            if (Number.isFinite(userId) && userId > 0) {
+                return userId;
+            }
+        }
+
+        const userCache = window._mst_player_user;
+        if (userCache && typeof userCache === 'object') {
+            const cachedUserId = Object.keys(userCache)
+                .map(Number)
+                .find(userId => Number.isFinite(userId) && userId > 0);
+            if (cachedUserId) return cachedUserId;
+        }
+
+        throw new Error('无法获取当前用户 ID');
+    }
+
+    function getPlaybackTargetSeconds(context) {
+        const targetMilliseconds = Number(context.target);
+        const durationMilliseconds = Number(context.duration);
+        let targetSeconds = Number.isFinite(targetMilliseconds) && targetMilliseconds > 0
+            ? targetMilliseconds / 1000
+            : durationMilliseconds / 1000;
+
+        const player = context.player;
+        if (player && typeof player.getDuration === 'function') {
+            const playerDuration = Number(player.getDuration());
+            if (Number.isFinite(playerDuration) && playerDuration > 0) {
+                targetSeconds = playerDuration;
+            }
+        }
+
+        if (!Number.isFinite(targetSeconds) || targetSeconds <= 0) {
+            throw new Error('页面原生播放进度数据无效');
+        }
+        return targetSeconds;
+    }
+
+    function createPlaybackProgressForm(payload) {
+        const form = new FormData();
+        form.append('userId', String(payload.userId));
+        form.append('lessonId', String(payload.lessonId));
+        form.append('playedProgress', String(payload.playedProgress));
+        form.append('videoBizCode', String(payload.videoBizCode));
+        return form;
+    }
+
+    async function submitPlaybackProgress(payload) {
+        if (navigator.sendBeacon) {
+            try {
+                if (navigator.sendBeacon(PLAYBACK_PROGRESS_URL, createPlaybackProgressForm(payload))) {
+                    return true;
+                }
+            } catch (error) {
+                console.warn('[FxxkEWT360] sendBeacon 播放进度上报失败，尝试 fetch 兜底', error);
+            }
+        }
+
+        await fetch(PLAYBACK_PROGRESS_URL, {
+            method: 'POST',
+            mode: 'no-cors',
+            credentials: 'omit',
+            keepalive: true,
+            body: createPlaybackProgressForm(payload)
+        });
+        return true;
+    }
+
+    function markPlaybackProgressFinished(context) {
+        const finalProgress = Number(context.target);
+        if (!Number.isFinite(finalProgress) || finalProgress <= 0) return;
+
+        const reporter = context.reporter;
+        if (reporter) {
+            reporter.videoPlayedDuration = Math.max(Number(reporter.videoPlayedDuration) || 0, finalProgress);
+            reporter.videoPlayedDurationPrev = Math.max(Number(reporter.videoPlayedDurationPrev) || 0, finalProgress);
+        }
     }
 
     function syncReportSpeed(rep) {
@@ -1206,12 +1361,65 @@
         if (bizPoint._isFirstPlayStatus !== BIZ_POINT_PLAYING) {
             throw new Error('请先开始播放当前视频');
         }
-        if (typeof player.getPosition !== 'function' || typeof player.seek !== 'function') {
+        if (typeof player.getPosition !== 'function') {
             throw new Error('页面原生播放器接口不完整');
         }
 
         patchWatchTimeReporter(bizPoint);
-        return { player, bizPoint };
+        return {
+            player,
+            internalPlayer,
+            bizPoint,
+            progressLessonId: options.lessonId,
+            videoBizCode: String(options.videoBizCode)
+        };
+    }
+
+    function getFirstPositiveNumber(values) {
+        for (const value of values) {
+            const numberValue = Number(value);
+            if (Number.isFinite(numberValue) && numberValue > 0) {
+                return numberValue;
+            }
+        }
+        return NaN;
+    }
+
+    function getStudyRecordContext(component, reporter, progress) {
+        const state = component && component.state ? component.state : {};
+        const props = component && component.props ? component.props : {};
+        const activeLesson = props.activeLesson || {};
+        const courseId = getFirstPositiveNumber([
+            state.courseId,
+            reporter.courseId,
+            props.courseId,
+            activeLesson.courseId
+        ]);
+        const lessonId = getFirstPositiveNumber([
+            state.lessonId,
+            reporter.lessonId,
+            activeLesson.lessonId,
+            activeLesson.id
+        ]);
+        const videoTotalTime = Math.floor(getFirstPositiveNumber([
+            state.videoTotalTime,
+            reporter.videoDuration,
+            progress.duration
+        ]));
+
+        if (!Number.isFinite(courseId) || !Number.isFinite(lessonId) || !Number.isFinite(videoTotalTime)) {
+            throw new Error('页面原生课程完成记录上下文无效');
+        }
+
+        return {
+            record: {
+                courseId,
+                lessonId,
+                processTime: videoTotalTime,
+                finished: 1
+            },
+            player: component.oEplayer || null
+        };
     }
 
     function getReadyQuickFinishContext() {
@@ -1226,18 +1434,20 @@
             throw new Error('页面原生进度上报未启用或尚未就绪');
         }
 
+        const progress = getNativeProgress(reporter);
         const context = {
             component,
             reporter,
             homeworkId: Number(reporter.homeworkId),
             lessonId: Number(reporter.lessonId),
             mode: isSchoolVideo ? 'school' : 'compensation',
-            ...getNativeProgress(reporter)
+            ...progress
         };
 
-        if (isSchoolVideo || settings.quickFinishWatchTime) {
-            Object.assign(context, getBizPointContext(component, reporter));
+        if (!isSchoolVideo) {
+            Object.assign(context, getStudyRecordContext(component, reporter, progress));
         }
+        Object.assign(context, getBizPointContext(component, reporter));
         return context;
     }
 
@@ -1270,32 +1480,221 @@
         return true;
     }
 
+    function waitForTick(ms = 0) {
+        return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    function stopNativeReporter(reporter) {
+        reporter.reportEnabled = false;
+        if (reporter.timeInterval) {
+            clearInterval(reporter.timeInterval);
+            reporter.timeInterval = null;
+        }
+    }
+
+    function markStudyRecordFinished(context) {
+        const { component, reporter, record } = context;
+        if (reporter) {
+            reporter.videoPlayedDuration = Math.max(Number(reporter.videoPlayedDuration) || 0, record.processTime);
+        }
+        if (component) {
+            component.videoChangeFinished = true;
+            if (component.state) {
+                const statePatch = { submitedLesson: record.lessonId };
+                if (typeof component.setState === 'function') {
+                    component.setState(statePatch);
+                } else {
+                    Object.assign(component.state, statePatch);
+                }
+            }
+        }
+    }
+
+    async function submitStudyRecordByFetch(record) {
+        const headers = {
+            Accept: 'application/json, text/plain, */*',
+            'Content-Type': 'application/json'
+        };
+        const token = readCookie('token') || sessionStorage.getItem('token') || '';
+        const ssoTicket = readCookie('sso-ticket');
+        if (token) headers.token = token;
+        if (ssoTicket) headers.EWT_REQUEST_HEADER_USER_TICKET = ssoTicket;
+
+        const response = await fetch(STUDY_RECORD_SUBMIT_URL, {
+            method: 'POST',
+            mode: 'cors',
+            credentials: 'omit',
+            headers,
+            body: JSON.stringify({ recordList: [record] })
+        });
+        const text = await response.text();
+        let data = null;
+        if (text) {
+            try {
+                data = JSON.parse(text);
+            } catch (error) {
+                data = { raw: text };
+            }
+        }
+        if (!response.ok) {
+            throw new Error(`课程完成记录提交失败 (${response.status})`);
+        }
+        if (data && data.success === false) {
+            throw new Error(data.message || data.msg || '课程完成记录提交被拒绝');
+        }
+        return data;
+    }
+
+    async function submitStudyRecordByNativeComponent(context) {
+        const component = context.component;
+        if (!component || typeof component.submitCourseLog !== 'function') return false;
+
+        const player = context.player || component.oEplayer;
+        const originalGetPosition = player && player.getPosition;
+        if (typeof originalGetPosition === 'function') {
+            player.getPosition = () => context.record.processTime / 1000;
+        }
+        try {
+            component.submitCourseLog({ ...context.record });
+        } finally {
+            if (typeof originalGetPosition === 'function') {
+                player.getPosition = originalGetPosition;
+            }
+        }
+        await waitForTick(800);
+        return true;
+    }
+
+    async function uploadStudyRecordProgress(context) {
+        if (!context.record) return false;
+
+        let fetchError = null;
+        try {
+            await submitStudyRecordByFetch(context.record);
+            markStudyRecordFinished(context);
+            return true;
+        } catch (error) {
+            fetchError = error;
+            console.warn('[FxxkEWT360] 直接提交课程完成记录失败，尝试页面原生方法', error);
+        }
+
+        try {
+            const nativeTriggered = await submitStudyRecordByNativeComponent(context);
+            if (nativeTriggered) {
+                markStudyRecordFinished(context);
+                return true;
+            }
+        } catch (error) {
+            throw error;
+        }
+        throw fetchError || new Error('课程完成记录提交失败');
+    }
+
     async function uploadQuickFinishProgress(context) {
-        const { player, bizPoint, playedDuration, target } = context;
+        const { bizPoint, playedDuration, target } = context;
         const reportedDuration = target - playedDuration;
         if (reportedDuration <= 0) return false;
 
-        const currentPosition = Number(player.getPosition());
-        if (!Number.isFinite(currentPosition) || currentPosition < 0) {
-            throw new Error('页面原生播放位置无效');
+        const configuredInterval = Number(bizPoint._options && bizPoint._options.intervalTime) * 1000;
+        const interval = Math.min(
+            BIZ_POINT_MAX_SEGMENT_MS,
+            Math.max(1000, configuredInterval || BIZ_POINT_MAX_SEGMENT_MS)
+        );
+        const hadFrequencyTimer = Boolean(bizPoint._timer);
+        if (typeof bizPoint.stopFrequencyUpload === 'function') {
+            bizPoint.stopFrequencyUpload();
+        } else if (bizPoint._timer) {
+            clearTimeout(bizPoint._timer);
+            bizPoint._timer = null;
         }
 
-        player.seek(target / 1000);
-
-        let uploadPromise;
-        quickFinishBizPointReports.add(bizPoint);
+        let cursor = playedDuration;
+        let uploaded = false;
         try {
-            uploadPromise = bizPoint.upload(
-                BIZ_POINT_PLAYING,
-                BIZ_POINT_WATCH,
-                0,
-                reportedDuration
-            );
-        } finally {
-            quickFinishBizPointReports.delete(bizPoint);
+            while (cursor < target) {
+                const segmentDuration = Math.min(interval, target - cursor);
+                cursor += segmentDuration;
+
+                quickFinishBizPointReports.add(bizPoint);
+                quickFinishPointTimeOverrides.set(bizPoint, cursor);
+                try {
+                    await bizPoint.upload(
+                        BIZ_POINT_PLAYING,
+                        BIZ_POINT_WATCH,
+                        segmentDuration,
+                        segmentDuration
+                    );
+                } finally {
+                    quickFinishBizPointReports.delete(bizPoint);
+                    quickFinishPointTimeOverrides.delete(bizPoint);
+                }
+                uploaded = true;
+            }
+        } catch (error) {
+            if (hadFrequencyTimer && typeof bizPoint.startFrequencyUpload === 'function') {
+                bizPoint.startFrequencyUpload();
+            }
+            throw error;
         }
-        await uploadPromise;
+        return uploaded;
+    }
+
+    async function uploadPlaybackProgress(context) {
+        const playedProgress = getPlaybackTargetSeconds(context);
+        const lessonId = getFirstPositiveNumber([
+            context.progressLessonId,
+            context.lessonId,
+            context.reporter && context.reporter.lessonId
+        ]);
+        const videoBizCode = String(
+            context.videoBizCode ||
+            context.bizPoint && context.bizPoint._options && context.bizPoint._options.videoBizCode ||
+            ''
+        );
+
+        if (!Number.isFinite(lessonId) || lessonId <= 0 || !videoBizCode) {
+            throw new Error('页面原生播放进度上下文无效');
+        }
+
+        const payload = {
+            userId: getCurrentUserId(),
+            lessonId,
+            playedProgress: Number(playedProgress.toFixed(6)),
+            videoBizCode
+        };
+
+        await submitPlaybackProgress(payload);
+        markPlaybackProgressFinished(context);
         return true;
+    }
+
+    async function submitSchoolVideoCheckPass(context) {
+        const component = context.component;
+        const reporter = context.reporter;
+        if (!component || typeof component.reportVideoPoint !== 'function' || !reporter) {
+            return false;
+        }
+
+        const homeworkId = Number(reporter.homeworkId);
+        const lessonId = Number(reporter.lessonId);
+        if (!Number.isFinite(homeworkId) || homeworkId <= 0 ||
+            !Number.isFinite(lessonId) || lessonId <= 0) {
+            return false;
+        }
+
+        try {
+            return await component.reportVideoPoint({
+                homeworkId,
+                lessonId: lessonId + 2000000,
+                type: 2,
+                interactivePointId: null,
+                platform: 1,
+                seriousCheckResult: 2
+            });
+        } catch (error) {
+            console.warn('[FxxkEWT360] 学校视频认真度检查完成上报失败，继续提交播放进度', error);
+            return false;
+        }
     }
 
     async function quickFinish() {
@@ -1315,33 +1714,50 @@
             const reportContext = getReadyQuickFinishContext();
             assertSameReportContext(initialContext, reportContext);
 
-            const { reporter, target, mode } = reportContext;
+            const { reporter, target, mode, record } = reportContext;
+            const completionTarget = record ? Math.max(target, record.processTime) : reportContext.duration;
             let reportTriggered = true;
+            let studyRecordSubmitted = false;
+            let playbackProgressSubmitted = false;
+            let videoCheckSubmitted = false;
+            let watchTimeSynced = false;
+            let nativeReportError = null;
             if (mode === 'school') {
-                reportTriggered = await uploadQuickFinishProgress(reportContext);
+                const schoolContext = { ...reportContext, target: completionTarget };
+                videoCheckSubmitted = await submitSchoolVideoCheckPass(schoolContext);
+                playbackProgressSubmitted = await uploadPlaybackProgress(schoolContext);
+                reportTriggered = await uploadQuickFinishProgress(schoolContext);
+                watchTimeSynced = reportTriggered;
+                reportTriggered = reportTriggered || playbackProgressSubmitted;
             } else {
-                const reportPromise = reporter.report(target);
-                reporter.reportEnabled = false;
-                if (reporter.timeInterval) {
-                    clearInterval(reporter.timeInterval);
-                    reporter.timeInterval = null;
+                studyRecordSubmitted = await uploadStudyRecordProgress(reportContext);
+                try {
+                    await reporter.report(completionTarget);
+                } catch (error) {
+                    nativeReportError = error;
+                    console.warn('[FxxkEWT360] 页面原生进度上报失败，已保留课程完成记录提交结果', error);
+                } finally {
+                    stopNativeReporter(reporter);
                 }
-                await reportPromise;
-                if (settings.quickFinishWatchTime) {
-                    await uploadQuickFinishProgress(reportContext);
+                watchTimeSynced = await uploadQuickFinishProgress({ ...reportContext, target: completionTarget });
+                if (nativeReportError && !studyRecordSubmitted) {
+                    throw nativeReportError;
                 }
             }
 
-            console.log('[FxxkEWT360] 已触发页面原生进度上报', {
+            console.log('[FxxkEWT360] 已触发一键完成上报', {
                 lessonId: reporter.lessonId,
                 homeworkId: reporter.homeworkId,
                 mode,
-                target,
-                watchTimeSynced: settings.quickFinishWatchTime
+                target: completionTarget,
+                studyRecordSubmitted,
+                playbackProgressSubmitted,
+                videoCheckSubmitted,
+                watchTimeSynced
             });
             alert(reportTriggered
-                ? '已触发页面原生进度上报，请稍后刷新进度确认'
-                : '页面原生进度已达到完成阈值，请刷新进度确认');
+                ? '已提交当前视频完成记录，请稍后刷新进度确认'
+                : '当前视频已达到完成阈值，请刷新进度确认');
         } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
             console.error('[FxxkEWT360] 一键完成失败', error);
@@ -1842,13 +2258,9 @@
                             <span>倍速同步看课时长(测试)</span>
                             <input type="checkbox" id="fxxkewt-accelerateWatchTime" ${settings.accelerateWatchTime ? 'checked' : ''}>
                         </div>
-                        <div class="fxxkewt-row">
-                            <span>一键完成同步看课时长(测试)</span>
-                            <input type="checkbox" id="fxxkewt-quickFinishWatchTime" ${settings.quickFinishWatchTime ? 'checked' : ''}>
-                        </div>
                         <button type="button" id="fxxkewt-quickfinish">一键完成当前视频(测试)</button>
                         <div class="fxxkewt-warning">
-                        直接触发当前课程的页面原生上报，请刷新页面确认结果。
+                        提交当前课程完成记录并触发页面原生进度上报，请刷新页面确认结果。
                         <br>
                         开启倍速后若不勾选"倍速同步看课时长", 可能会导致实际看课时长变短，这在后台会有体现; 即使勾选了也请慎用倍速功能。
                         <br>
@@ -1907,10 +2319,6 @@
                 settings.accelerateWatchTime = e.target.checked;
                 saveSettings();
                 setSpeed();
-            };
-            panel.querySelector('#fxxkewt-quickFinishWatchTime').onchange = (e) => {
-                settings.quickFinishWatchTime = e.target.checked;
-                saveSettings();
             };
             panel.querySelector('#fxxkewt-video-download').onclick = downloadCurrentVideo;
             panel.querySelector('#fxxkewt-screenshot-capture').onclick = () => captureVideoScreenshot();
