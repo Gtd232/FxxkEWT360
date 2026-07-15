@@ -17,11 +17,14 @@
 
     const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
     const EARNEST_CHECK_PATCH_FLAG = '__fxxkewt_earnest_check_patched__';
+    const LESSON_CLICK_PATCH_FLAG = '__fxxkewt_lesson_click_patched__';
     const WARN_BLOCK_COUNT_FLAG = '__fxxkewt_warn_block_count__';
     const EARNEST_FACTORY_PATCH_FLAG = '__fxxkewt_earnest_factory_patched__';
     const WEBPACK_PUSH_PATCH_FLAG = '__fxxkewt_webpack_push_patched__';
     const EARNEST_CHECK_WARN_MARKER = '认真度检测-模拟点击通过';
     const EARNEST_CHECK_FIBER_WARN_MARKER = '认真度检测-Fiber直调toCheck';
+    const LESSON_CLICK_WARN_MARKER = '模拟点击播放列表中课程讲';
+    const LESSON_CLICK_FIBER_WARN_MARKER = 'Fiber直接调用handleItemClick';
 
     function blockAllWarnCalls(source) {
         const warnPattern = /([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.warn\(/g;
@@ -44,17 +47,9 @@
         return { source: patchedSource, count: replacements.length };
     }
 
-    function patchEarnestCheckFactory(factory) {
-        if (typeof factory !== 'function' || factory[EARNEST_FACTORY_PATCH_FLAG]) return factory;
-
-        let source;
-        try {
-            source = Function.prototype.toString.call(factory);
-        } catch (error) {
-            return factory;
-        }
-        const markerIndex = source.indexOf(EARNEST_CHECK_WARN_MARKER);
-        if (markerIndex < 0) return factory;
+    function patchTrustedEventGate(source, marker) {
+        const markerIndex = source.indexOf(marker);
+        if (markerIndex < 0) return { source, ready: false, found: false };
 
         const gatePattern = /!\s*([A-Za-z_$][\w$]*)\.isTrusted/g;
         const gateWindowStart = Math.max(0, markerIndex - 1600);
@@ -64,29 +59,47 @@
             gateMatch = { ...match, index: gateWindowStart + match.index };
         }
 
-        let patchedSource = source;
-        let gateReady = /if\(\s*false\s*\|\|/.test(gateWindow);
-        if (gateMatch) {
-            patchedSource = source.slice(0, gateMatch.index) +
+        const alreadyReady = /if\(\s*false\s*\|\|/.test(gateWindow);
+        if (!gateMatch) return { source, ready: alreadyReady, found: true };
+        return {
+            source: source.slice(0, gateMatch.index) +
                 'false' +
-                source.slice(gateMatch.index + gateMatch[0].length);
-            gateReady = true;
+                source.slice(gateMatch.index + gateMatch[0].length),
+            ready: true,
+            found: true
+        };
+    }
+
+    function patchHomeworkPlayFactory(factory) {
+        if (typeof factory !== 'function' || factory[EARNEST_FACTORY_PATCH_FLAG]) return factory;
+
+        let source;
+        try {
+            source = Function.prototype.toString.call(factory);
+        } catch (error) {
+            return factory;
         }
+        if (!source.includes(EARNEST_CHECK_WARN_MARKER) && !source.includes(LESSON_CLICK_WARN_MARKER)) {
+            return factory;
+        }
+
+        const lessonGate = patchTrustedEventGate(source, LESSON_CLICK_WARN_MARKER);
+        const earnestGate = patchTrustedEventGate(lessonGate.source, EARNEST_CHECK_WARN_MARKER);
+        let patchedSource = earnestGate.source;
         const blockedWarns = blockAllWarnCalls(patchedSource);
-        if (!gateReady && blockedWarns.count === 0) return factory;
+        if (!lessonGate.ready && !earnestGate.ready && blockedWarns.count === 0) return factory;
         patchedSource = blockedWarns.source;
         try {
             const FunctionConstructor = pageWindow.Function || Function;
             const patchedFactory = FunctionConstructor(`return (${patchedSource});`)();
             Object.defineProperty(patchedFactory, EARNEST_FACTORY_PATCH_FLAG, { value: true });
-            if (gateReady) pageWindow[EARNEST_CHECK_PATCH_FLAG] = true;
+            if (lessonGate.ready) pageWindow[LESSON_CLICK_PATCH_FLAG] = true;
+            if (earnestGate.ready) pageWindow[EARNEST_CHECK_PATCH_FLAG] = true;
             pageWindow[WARN_BLOCK_COUNT_FLAG] = blockedWarns.count;
-            console.log(gateReady
-                ? `[FxxkEWT360] 已替换认真度检查 isTrusted 门槛并阻止该模块全部 ${blockedWarns.count} 条 warn 调用`
-                : `[FxxkEWT360] 已阻止该模块全部 ${blockedWarns.count} 条 warn 调用，认真度门槛未匹配`);
+            console.log(`[FxxkEWT360] 页面脚本补丁完成：课程点击=${lessonGate.ready}，认真度检查=${earnestGate.ready}，已阻止 ${blockedWarns.count} 条 warn 调用`);
             return patchedFactory;
         } catch (error) {
-            console.error('[FxxkEWT360] 替换认真度检查脚本失败', error);
+            console.error('[FxxkEWT360] 替换课程页面脚本失败', error);
             return factory;
         }
     }
@@ -97,7 +110,7 @@
 
         for (const moduleId of Object.keys(modules)) {
             const factory = modules[moduleId];
-            const patchedFactory = patchEarnestCheckFactory(factory);
+            const patchedFactory = patchHomeworkPlayFactory(factory);
             if (patchedFactory !== factory) {
                 modules[moduleId] = patchedFactory;
             }
@@ -2101,6 +2114,15 @@
     }
 
     function selectLesson(el) {
+        if (pageWindow[LESSON_CLICK_PATCH_FLAG]) {
+            const MouseEventConstructor = pageWindow.MouseEvent || MouseEvent;
+            return el.dispatchEvent(new MouseEventConstructor('click', {
+                bubbles: true,
+                cancelable: true,
+                view: pageWindow
+            }));
+        }
+
         let fiber = getReactFiber(el);
         if (!fiber) return false;
 
@@ -2111,6 +2133,14 @@
                 const lessonKey = Object.keys(props).find(k => props[k] && typeof props[k] === 'object' && (props[k].contentId || props[k].lessonId || props[k].title));
                 
                 if (funcKey && lessonKey) {
+                    let callbackSource = '';
+                    try {
+                        callbackSource = Function.prototype.toString.call(props[funcKey]);
+                    } catch (error) {}
+                    if (callbackSource.includes(LESSON_CLICK_FIBER_WARN_MARKER)) {
+                        console.error('[FxxkEWT360] 新版课程点击补丁未在页面脚本加载前生效，请刷新页面');
+                        return false;
+                    }
                     console.log(`[FxxkEWT360] 找到切换课程函数 ${funcKey} 和数据 ${lessonKey} ,执行切换`);
                     props[funcKey](props[lessonKey]);
                     return true;
@@ -2119,6 +2149,24 @@
             fiber = fiber.return;
         }
         return false;
+    }
+
+    function getLessonElements() {
+        const legacyElements = Array.from(document.querySelectorAll('[data-ac="lesson-item"]'));
+        if (legacyElements.length > 0) return legacyElements;
+
+        return Array.from(document.querySelectorAll('[class*="item-"]')).filter(element => {
+            const classes = Array.from(element.classList || []);
+            return classes.some(className => className.startsWith('item-')) &&
+                classes.some(className => /^item\d+$/.test(className));
+        });
+    }
+
+    function isLessonFinished(element) {
+        if (String(element.textContent || '').includes('已完成')) return true;
+        return Array.from(element.querySelectorAll('[class*="finished"]')).some(child =>
+            Array.from(child.classList || []).some(className => className.startsWith('finished'))
+        );
     }
 
     function autoPlayNext() {
@@ -2138,17 +2186,18 @@
 
         if (isSwitching) return;
 
-        const lessons = Array.from(document.querySelectorAll('[data-ac="lesson-item"]'));
+        const lessons = getLessonElements();
         if (lessons.length === 0) return;
 
-        const activeIndex = lessons.findIndex(el => el.classList.contains('active-EI2Hl') || el.className.includes('active'));
+        const activeIndex = lessons.findIndex(element =>
+            Array.from(element.classList || []).some(className => className.startsWith('active'))
+        );
         if (activeIndex === -1) return;
 
         let nextLesson = null;
 
         for (let i = activeIndex + 1; i < lessons.length; i++) {
-            const isDone = lessons[i].querySelector('[class*="finished"]');
-            if (!isDone) {
+            if (!isLessonFinished(lessons[i])) {
                 nextLesson = lessons[i];
                 break;
             }
@@ -2156,8 +2205,7 @@
 
         if (!nextLesson) {
             for (let i = 0; i < activeIndex; i++) {
-                const isDone = lessons[i].querySelector('[class*="finished"]');
-                if (!isDone) {
+                if (!isLessonFinished(lessons[i])) {
                     nextLesson = lessons[i];
                     break;
                 }
@@ -2166,12 +2214,25 @@
 
         if (nextLesson) {
             isSwitching = true;
+            const previousUrl = location.href;
+            const previousActiveLesson = lessons[activeIndex];
             console.log("[FxxkEWT360] 检测到当前课程已播放完毕 准备自动切换到下一节未完成课程", nextLesson.textContent.trim());
             const success = selectLesson(nextLesson);
             if (success) {
                 console.log("[FxxkEWT360] 自动切换下一节课");
+                setTimeout(() => {
+                    if (!isSwitching) return;
+                    const currentLessons = getLessonElements();
+                    const currentActiveLesson = currentLessons.find(element =>
+                        Array.from(element.classList || []).some(className => className.startsWith('active'))
+                    );
+                    if (location.href === previousUrl && currentActiveLesson === previousActiveLesson) {
+                        console.error('[FxxkEWT360] 自动切换未生效，解除锁定并等待重试');
+                        isSwitching = false;
+                    }
+                }, 3000);
             } else {
-                console.error("[FxxkEWT360] 自动切换下一节课失败 未能成功提取 React 回调");
+                console.error("[FxxkEWT360] 自动切换下一节课失败 未能触发页面原生点击");
                 isSwitching = false;
             }
         } else {
