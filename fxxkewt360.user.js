@@ -15,6 +15,126 @@
 (function() {
     'use strict';
 
+    const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+    const EARNEST_CHECK_PATCH_FLAG = '__fxxkewt_earnest_check_patched__';
+    const WARN_BLOCK_COUNT_FLAG = '__fxxkewt_warn_block_count__';
+    const EARNEST_FACTORY_PATCH_FLAG = '__fxxkewt_earnest_factory_patched__';
+    const WEBPACK_PUSH_PATCH_FLAG = '__fxxkewt_webpack_push_patched__';
+    const EARNEST_CHECK_WARN_MARKER = '认真度检测-模拟点击通过';
+    const EARNEST_CHECK_FIBER_WARN_MARKER = '认真度检测-Fiber直调toCheck';
+
+    function blockAllWarnCalls(source) {
+        const warnPattern = /([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.warn\(/g;
+        const replacements = [];
+        let match;
+        while ((match = warnPattern.exec(source))) {
+            replacements.push({
+                start: match.index,
+                end: match.index + match[1].length + '.warn'.length
+            });
+        }
+
+        let patchedSource = source;
+        replacements.sort((a, b) => b.start - a.start);
+        for (const replacement of replacements) {
+            patchedSource = patchedSource.slice(0, replacement.start) +
+                '(()=>{})' +
+                patchedSource.slice(replacement.end);
+        }
+        return { source: patchedSource, count: replacements.length };
+    }
+
+    function patchEarnestCheckFactory(factory) {
+        if (typeof factory !== 'function' || factory[EARNEST_FACTORY_PATCH_FLAG]) return factory;
+
+        let source;
+        try {
+            source = Function.prototype.toString.call(factory);
+        } catch (error) {
+            return factory;
+        }
+        const markerIndex = source.indexOf(EARNEST_CHECK_WARN_MARKER);
+        if (markerIndex < 0) return factory;
+
+        const gatePattern = /!\s*([A-Za-z_$][\w$]*)\.isTrusted/g;
+        const gateWindowStart = Math.max(0, markerIndex - 1600);
+        const gateWindow = source.slice(gateWindowStart, markerIndex);
+        let gateMatch = null;
+        for (const match of gateWindow.matchAll(gatePattern)) {
+            gateMatch = { ...match, index: gateWindowStart + match.index };
+        }
+
+        let patchedSource = source;
+        let gateReady = /if\(\s*false\s*\|\|/.test(gateWindow);
+        if (gateMatch) {
+            patchedSource = source.slice(0, gateMatch.index) +
+                'false' +
+                source.slice(gateMatch.index + gateMatch[0].length);
+            gateReady = true;
+        }
+        const blockedWarns = blockAllWarnCalls(patchedSource);
+        if (!gateReady && blockedWarns.count === 0) return factory;
+        patchedSource = blockedWarns.source;
+        try {
+            const FunctionConstructor = pageWindow.Function || Function;
+            const patchedFactory = FunctionConstructor(`return (${patchedSource});`)();
+            Object.defineProperty(patchedFactory, EARNEST_FACTORY_PATCH_FLAG, { value: true });
+            if (gateReady) pageWindow[EARNEST_CHECK_PATCH_FLAG] = true;
+            pageWindow[WARN_BLOCK_COUNT_FLAG] = blockedWarns.count;
+            console.log(gateReady
+                ? `[FxxkEWT360] 已替换认真度检查 isTrusted 门槛并阻止该模块全部 ${blockedWarns.count} 条 warn 调用`
+                : `[FxxkEWT360] 已阻止该模块全部 ${blockedWarns.count} 条 warn 调用，认真度门槛未匹配`);
+            return patchedFactory;
+        } catch (error) {
+            console.error('[FxxkEWT360] 替换认真度检查脚本失败', error);
+            return factory;
+        }
+    }
+
+    function patchWebpackChunkPayload(payload) {
+        const modules = Array.isArray(payload) && payload[1];
+        if (!modules || typeof modules !== 'object') return;
+
+        for (const moduleId of Object.keys(modules)) {
+            const factory = modules[moduleId];
+            const patchedFactory = patchEarnestCheckFactory(factory);
+            if (patchedFactory !== factory) {
+                modules[moduleId] = patchedFactory;
+            }
+        }
+    }
+
+    function ensureWebpackChunkPatch() {
+        const chunkName = 'webpackChunk_business_bend';
+        const queue = pageWindow[chunkName] || (pageWindow[chunkName] = []);
+        if (!Array.isArray(queue)) return;
+
+        const currentPush = queue.push;
+        if (typeof currentPush !== 'function' || currentPush[WEBPACK_PUSH_PATCH_FLAG]) return;
+        if (currentPush.name === 'push') {
+            for (const payload of queue) patchWebpackChunkPayload(payload);
+        }
+
+        const patchedPush = function(...payloads) {
+            for (const payload of payloads) patchWebpackChunkPayload(payload);
+            return currentPush.apply(this, payloads);
+        };
+        Object.defineProperty(patchedPush, WEBPACK_PUSH_PATCH_FLAG, { value: true });
+        queue.push = patchedPush;
+    }
+
+    ensureWebpackChunkPatch();
+    const originalAppendChild = Node.prototype.appendChild;
+    Node.prototype.appendChild = function(child) {
+        if (child && child.nodeName === 'SCRIPT') ensureWebpackChunkPatch();
+        return originalAppendChild.call(this, child);
+    };
+    const originalInsertBefore = Node.prototype.insertBefore;
+    Node.prototype.insertBefore = function(child, referenceNode) {
+        if (child && child.nodeName === 'SCRIPT') ensureWebpackChunkPatch();
+        return originalInsertBefore.call(this, child, referenceNode);
+    };
+
     const orgVisibilityState = Object.getOwnPropertyDescriptor(Document.prototype, 'visibilityState').get;
 
     Object.defineProperty(Document.prototype, 'visibilityState', {
@@ -92,6 +212,7 @@
     const BIZ_POINT_WATCH = 1;
     const BIZ_POINT_NORMAL_SPEED = 1;
     const BIZ_POINT_MAX_SEGMENT_MS = 60000;
+    const BIZ_POINT_UPLOAD_URL = 'https://bfe.ewt360.com/monitor/web/collect/batch';
     const STUDY_RECORD_SUBMIT_URL = 'https://gateway.ewt360.com/api/studyprod/course/lesson/record/submit';
     const PLAYBACK_PROGRESS_URL = 'https://bfe.ewt360.com/video/playbackProgress';
 
@@ -1464,7 +1585,39 @@
     function executeCheckPass(component) {
         if (!checkPassPromise) {
             checkPassPromise = Promise.resolve()
-                .then(() => component.toCheck())
+                .then(async () => {
+                    if (pageWindow[EARNEST_CHECK_PATCH_FLAG]) {
+                        const button = document.querySelector('[data-ac="check-pass"]');
+                        if (!button) throw new Error('认真度检查按钮已经失效');
+
+                        const MouseEventConstructor = pageWindow.MouseEvent || MouseEvent;
+                        button.dispatchEvent(new MouseEventConstructor('click', {
+                            bubbles: true,
+                            cancelable: true,
+                            view: pageWindow
+                        }));
+
+                        const deadline = Date.now() + 5000;
+                        while (button.isConnected &&
+                            document.querySelector('[data-ac="check-pass"]') === button &&
+                            Date.now() < deadline) {
+                            await waitForTick(100);
+                        }
+                        if (button.isConnected && document.querySelector('[data-ac="check-pass"]') === button) {
+                            throw new Error('认真度检查未确认通过');
+                        }
+                        return true;
+                    }
+
+                    let toCheckSource = '';
+                    try {
+                        toCheckSource = Function.prototype.toString.call(component.toCheck);
+                    } catch (error) {}
+                    if (toCheckSource.includes(EARNEST_CHECK_FIBER_WARN_MARKER)) {
+                        throw new Error('新版认真度检查补丁未在页面脚本加载前生效，请刷新页面后重试');
+                    }
+                    return component.toCheck();
+                })
                 .finally(() => {
                     checkPassPromise = null;
                 });
@@ -1621,7 +1774,7 @@
                     await bizPoint.upload(
                         BIZ_POINT_PLAYING,
                         BIZ_POINT_WATCH,
-                        segmentDuration,
+                        0,
                         segmentDuration
                     );
                 } finally {
@@ -1637,6 +1790,128 @@
             throw error;
         }
         return uploaded;
+    }
+
+    function createQuickFinishSinglePacket(bizPoint, duration, cursor) {
+        quickFinishBizPointReports.add(bizPoint);
+        quickFinishPointTimeOverrides.set(bizPoint, cursor);
+        let packet;
+        try {
+            packet = bizPoint.createParams(
+                BIZ_POINT_PLAYING,
+                BIZ_POINT_WATCH,
+                duration,
+                duration
+            );
+        } finally {
+            quickFinishBizPointReports.delete(bizPoint);
+            quickFinishPointTimeOverrides.delete(bizPoint);
+        }
+
+        const event = packet && packet.EventPackage && packet.EventPackage[0];
+        if (!packet || !event || packet.EventPackage.length !== 1) {
+            throw new Error('无法生成单请求看课时长参数');
+        }
+        event.stay_time = duration;
+        event.media_time = duration;
+        event.speed = BIZ_POINT_NORMAL_SPEED;
+        return packet;
+    }
+
+    function getQuickFinishRequestToken() {
+        return normalizeTokenCandidate(
+            readCookie('token') ||
+            readCookie('ewt_user') ||
+            readCookie('user') ||
+            getStorageItem(window.sessionStorage, 'token') ||
+            getStorageItem(window.localStorage, 'token') ||
+            getLocationParam('token') ||
+            getLocationParam('tk')
+        );
+    }
+
+    async function submitQuickFinishPacket(bizPoint, packet) {
+        const options = bizPoint && bizPoint._options || {};
+        const commonPackage = packet && packet.CommonPackage || {};
+        const event = packet && packet.EventPackage && packet.EventPackage[0];
+        if (!event || packet.EventPackage.length !== 1) throw new Error('单请求看课时长包无效');
+
+        const requestTime = Date.now();
+        const query = new URLSearchParams({
+            TrVideoBizCode: String(options.videoBizCode || commonPackage.videoBizCode || ''),
+            TrFallback: String(event.fallback || 0),
+            TrUserId: String(commonPackage.userid || ''),
+            TrLessonId: String(event.lesson_id || ''),
+            TrUuId: String(event.uuid || ''),
+            sdkVersion: String(commonPackage.sdkVersion || ''),
+            _: String(requestTime)
+        });
+        const headers = {
+            Accept: 'application/json, text/plain, */*',
+            'Content-Type': 'application/json'
+        };
+        const token = getQuickFinishRequestToken();
+        if (token) headers.token = token;
+        if (options.sessionId) headers['x-bfe-session-id'] = String(options.sessionId);
+
+        const response = await fetch(`${BIZ_POINT_UPLOAD_URL}?${query}`, {
+            method: 'POST',
+            mode: 'cors',
+            credentials: 'omit',
+            headers,
+            body: JSON.stringify({ ...packet, _: requestTime })
+        });
+        const text = await response.text();
+        let data = null;
+        if (text) {
+            try {
+                data = JSON.parse(text);
+            } catch (error) {
+                data = { raw: text };
+            }
+        }
+        const code = Number(data && data.code);
+        if (!response.ok || !data || data.raw !== undefined ||
+            data.success === false || !Number.isFinite(code) || code !== 200) {
+            throw new Error(data && (data.message || data.msg) || `单请求看课时长提交失败 (${response.status})`);
+        }
+        return data;
+    }
+
+    async function uploadQuickFinishProgressSingle(context) {
+        const { bizPoint, playedDuration, target } = context;
+        const reportedDuration = Math.round(target - playedDuration);
+        if (reportedDuration <= 0) {
+            return { uploaded: false, requestCount: 0, eventCount: 0 };
+        }
+
+        const hadFrequencyTimer = Boolean(bizPoint._timer);
+        if (typeof bizPoint.stopFrequencyUpload === 'function') {
+            bizPoint.stopFrequencyUpload();
+        } else if (bizPoint._timer) {
+            clearTimeout(bizPoint._timer);
+            bizPoint._timer = null;
+        }
+
+        try {
+            const packet = createQuickFinishSinglePacket(
+                bizPoint,
+                reportedDuration,
+                playedDuration + reportedDuration
+            );
+            await submitQuickFinishPacket(bizPoint, packet);
+            reportUsageTimeCompensation(reportedDuration);
+        } catch (error) {
+            if (hadFrequencyTimer && typeof bizPoint.startFrequencyUpload === 'function') {
+                bizPoint.startFrequencyUpload();
+            }
+            throw error;
+        }
+        return {
+            uploaded: true,
+            requestCount: 1,
+            eventCount: 1
+        };
     }
 
     async function uploadPlaybackProgress(context) {
@@ -1697,14 +1972,22 @@
         }
     }
 
-    async function quickFinish() {
+    async function runQuickFinish(options = {}) {
         if (quickFinishRunning) return;
 
-        const button = document.getElementById('fxxkewt-quickfinish');
+        const useSingleRequestWatchTime = options.watchTimeMode === 'single';
+        const buttonId = useSingleRequestWatchTime
+            ? 'fxxkewt-quickfinish-single'
+            : 'fxxkewt-quickfinish';
+        const button = document.getElementById(buttonId);
+        const quickFinishButtons = [
+            document.getElementById('fxxkewt-quickfinish'),
+            document.getElementById('fxxkewt-quickfinish-single')
+        ].filter(Boolean);
         const originalText = button ? button.textContent : '';
         quickFinishRunning = true;
+        for (const item of quickFinishButtons) item.disabled = true;
         if (button) {
-            button.disabled = true;
             button.textContent = '处理中...';
         }
 
@@ -1721,14 +2004,28 @@
             let playbackProgressSubmitted = false;
             let videoCheckSubmitted = false;
             let watchTimeSynced = false;
+            let watchTimeRequestCount = null;
+            let watchTimeEventCount = null;
             let nativeReportError = null;
+            const uploadWatchTime = async context => {
+                if (useSingleRequestWatchTime) {
+                    return uploadQuickFinishProgressSingle(context);
+                }
+                return {
+                    uploaded: await uploadQuickFinishProgress(context),
+                    requestCount: null,
+                    eventCount: null
+                };
+            };
             if (mode === 'school') {
                 const schoolContext = { ...reportContext, target: completionTarget };
                 videoCheckSubmitted = await submitSchoolVideoCheckPass(schoolContext);
                 playbackProgressSubmitted = await uploadPlaybackProgress(schoolContext);
-                reportTriggered = await uploadQuickFinishProgress(schoolContext);
-                watchTimeSynced = reportTriggered;
-                reportTriggered = reportTriggered || playbackProgressSubmitted;
+                const watchTimeResult = await uploadWatchTime(schoolContext);
+                watchTimeSynced = watchTimeResult.uploaded;
+                watchTimeRequestCount = watchTimeResult.requestCount;
+                watchTimeEventCount = watchTimeResult.eventCount;
+                reportTriggered = watchTimeSynced || playbackProgressSubmitted;
             } else {
                 studyRecordSubmitted = await uploadStudyRecordProgress(reportContext);
                 try {
@@ -1739,7 +2036,10 @@
                 } finally {
                     stopNativeReporter(reporter);
                 }
-                watchTimeSynced = await uploadQuickFinishProgress({ ...reportContext, target: completionTarget });
+                const watchTimeResult = await uploadWatchTime({ ...reportContext, target: completionTarget });
+                watchTimeSynced = watchTimeResult.uploaded;
+                watchTimeRequestCount = watchTimeResult.requestCount;
+                watchTimeEventCount = watchTimeResult.eventCount;
                 if (nativeReportError && !studyRecordSubmitted) {
                     throw nativeReportError;
                 }
@@ -1753,22 +2053,40 @@
                 studyRecordSubmitted,
                 playbackProgressSubmitted,
                 videoCheckSubmitted,
-                watchTimeSynced
+                watchTimeSynced,
+                watchTimeMode: useSingleRequestWatchTime ? 'single' : 'standard',
+                watchTimeRequestCount,
+                watchTimeEventCount
             });
-            alert(reportTriggered
-                ? '已提交当前视频完成记录，请稍后刷新进度确认'
-                : '当前视频已达到完成阈值，请刷新进度确认');
+            if (useSingleRequestWatchTime && watchTimeRequestCount !== null) {
+                alert(reportTriggered
+                    ? `单请求模式已提交当前视频：BizPoint ${watchTimeRequestCount} 个请求 / ${watchTimeEventCount} 个大时长 1 倍速事件。请刷新进度确认`
+                    : '当前视频已达到完成阈值，请刷新进度确认');
+            } else {
+                alert(reportTriggered
+                    ? '已提交当前视频完成记录，请稍后刷新进度确认'
+                    : '当前视频已达到完成阈值，请刷新进度确认');
+            }
         } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
-            console.error('[FxxkEWT360] 一键完成失败', error);
-            alert(`一键完成失败：${message}`);
+            const modeName = useSingleRequestWatchTime ? '单请求完成' : '一键完成';
+            console.error(`[FxxkEWT360] ${modeName}失败`, error);
+            alert(`${modeName}失败：${message}`);
         } finally {
             quickFinishRunning = false;
+            for (const item of quickFinishButtons) item.disabled = false;
             if (button) {
-                button.disabled = false;
                 button.textContent = originalText;
             }
         }
+    }
+
+    function quickFinish() {
+        return runQuickFinish();
+    }
+
+    function quickFinishSingle() {
+        return runQuickFinish({ watchTimeMode: 'single' });
     }
 
     function checkpass() {
@@ -1776,7 +2094,7 @@
         const component = getActiveCheckComponent();
         if (!component) return;
 
-        console.log("[FxxkEWT360] 检测到认真度检查 正在调用页面原生接口");
+        console.log("[FxxkEWT360] 检测到认真度检查 正在触发页面原生点击逻辑");
         executeCheckPass(component).catch(error => {
             console.error("[FxxkEWT360] 页面原生过检失败", error);
         });
@@ -2025,7 +2343,8 @@
                 #fxxkewt-more-tools[hidden] {
                     display: none;
                 }
-                #fxxkewt-quickfinish {
+                #fxxkewt-quickfinish,
+                #fxxkewt-quickfinish-single {
                     width: 100%;
                     padding: 6px;
                     border: 1px solid #888;
@@ -2034,7 +2353,13 @@
                     font-size: 12px;
                     cursor: pointer;
                 }
-                #fxxkewt-quickfinish:disabled {
+                #fxxkewt-quickfinish-single {
+                    margin-top: 4px;
+                    border-color: #8a6a22;
+                    background: #fff3cd;
+                }
+                #fxxkewt-quickfinish:disabled,
+                #fxxkewt-quickfinish-single:disabled {
                     cursor: wait;
                     opacity: 0.65;
                 }
@@ -2254,14 +2579,17 @@
                             <span>禁止暂停</span>
                             <input type="checkbox" id="fxxkewt-preventPause" ${settings.preventPause ? 'checked' : ''}>
                         </div>
-                        <div class="fxxkewt-row">
+                        <div class="fxxkewt-row" style="display: none;">
                             <span>倍速同步看课时长(测试)</span>
                             <input type="checkbox" id="fxxkewt-accelerateWatchTime" ${settings.accelerateWatchTime ? 'checked' : ''}>
                         </div>
                         <button type="button" id="fxxkewt-quickfinish">一键完成当前视频(测试)</button>
+<!--                        <button type="button" id="fxxkewt-quickfinish-single">单请求完成当前视频(实验)</button>-->
                         <div class="fxxkewt-warning">
                         提交当前课程完成记录并触发页面原生进度上报，请刷新页面确认结果。
                         <br>
+<!--                        单请求模式只提交一个 EventPackage，stay_time 和 media_time 都是完整剩余时长，speed=1；服务端仍可能拒绝异常大的单次时长，失败时请使用上方普通模式。-->
+<!--                        <br>-->
                         开启倍速后若不勾选"倍速同步看课时长", 可能会导致实际看课时长变短，这在后台会有体现; 即使勾选了也请慎用倍速功能。
                         <br>
                         慎用测试功能，测试功能可能会未按预期工作。
@@ -2352,6 +2680,7 @@
                 moreTools.hidden = !expanded;
             };
             panel.querySelector('#fxxkewt-quickfinish').onclick = quickFinish;
+            panel.querySelector('#fxxkewt-quickfinish-single').onclick = quickFinishSingle;
 
             makeDraggable(panel, panel.querySelector('#fxxkewt-header'));
             console.log("[FxxkEWT360] 设置面板创建成功");
