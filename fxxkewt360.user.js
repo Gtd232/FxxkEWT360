@@ -1,13 +1,16 @@
 // ==UserScript==
 // @name         FxxkEWT360
 // @namespace    https://github.com/Gtd232/FxxkEWT360
-// @version      5.0
+// @version      5.1
 // @description  逃避升学e网通
 // @author       Gtd232
 // @match        *://*.ewt360.com/*
 // @run-at       document-start
 // @require      https://cdn.jsdelivr.net/npm/mux.js@6.3.0/dist/mux.min.js
 // @require      https://cdn.jsdelivr.net/npm/mp4box@0.5.4/dist/mp4box.all.min.js
+// @downloadURL  https://cdn.jsdelivr.net/gh/Gtd232/FxxkEWT360/fxxkewt360.user.js
+// @updateURL    https://cdn.jsdelivr.net/gh/Gtd232/FxxkEWT360/fxxkewt360.user.js
+// @supportURL   https://github.com/Gtd232/FxxkEWT360/issues
 // @grant        unsafeWindow
 // ==/UserScript==
 
@@ -17,6 +20,7 @@
 
     const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
     const EARNEST_CHECK_PATCH_FLAG = '__fxxkewt_earnest_check_patched__';
+    const EARNEST_POPUP_BLOCK_FLAG = '__fxxkewt_block_earnest_check__';
     const LESSON_CLICK_PATCH_FLAG = '__fxxkewt_lesson_click_patched__';
     const WARN_BLOCK_COUNT_FLAG = '__fxxkewt_warn_block_count__';
     const EARNEST_FACTORY_PATCH_FLAG = '__fxxkewt_earnest_factory_patched__';
@@ -25,6 +29,11 @@
     const EARNEST_CHECK_FIBER_WARN_MARKER = '认真度检测-Fiber直调toCheck';
     const LESSON_CLICK_WARN_MARKER = '模拟点击播放列表中课程讲';
     const LESSON_CLICK_FIBER_WARN_MARKER = 'Fiber直接调用handleItemClick';
+    const EARNEST_POPUP_PATCH_MARKER = 'earnestCheckVisible:!0,currentCheckTime:';
+
+    // The page bundle reads this flag when it reaches the earnest-check timer.
+    // Keep the safe default until persisted settings have been loaded below.
+    pageWindow[EARNEST_POPUP_BLOCK_FLAG] = false;
 
     function blockAllWarnCalls(source) {
         const warnPattern = /([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.warn\(/g;
@@ -70,6 +79,24 @@
         };
     }
 
+    function patchEarnestPopupCreation(source) {
+        const alreadyReady = source.includes(`!window.${EARNEST_POPUP_BLOCK_FLAG}&&(`);
+        if (alreadyReady) return { source, ready: true, found: true };
+
+        const popupPattern = /this\.setState\(\{earnestCheckVisible:!0,currentCheckTime:[^}]+\}\),this\.setFeedBackButtonVisible\(!1,!0\)/;
+        const match = popupPattern.exec(source);
+        if (!match) {
+            return { source, ready: false, found: source.includes(EARNEST_POPUP_PATCH_MARKER) };
+        }
+
+        const guardedPopup = `!window.${EARNEST_POPUP_BLOCK_FLAG}&&(${match[0]})`;
+        return {
+            source: source.slice(0, match.index) + guardedPopup + source.slice(match.index + match[0].length),
+            ready: true,
+            found: true
+        };
+    }
+
     function patchHomeworkPlayFactory(factory) {
         if (typeof factory !== 'function' || factory[EARNEST_FACTORY_PATCH_FLAG]) return factory;
 
@@ -79,15 +106,18 @@
         } catch (error) {
             return factory;
         }
-        if (!source.includes(EARNEST_CHECK_WARN_MARKER) && !source.includes(LESSON_CLICK_WARN_MARKER)) {
+        if (!source.includes(EARNEST_CHECK_WARN_MARKER) &&
+            !source.includes(LESSON_CLICK_WARN_MARKER) &&
+            !source.includes(EARNEST_POPUP_PATCH_MARKER)) {
             return factory;
         }
 
         const lessonGate = patchTrustedEventGate(source, LESSON_CLICK_WARN_MARKER);
         const earnestGate = patchTrustedEventGate(lessonGate.source, EARNEST_CHECK_WARN_MARKER);
-        let patchedSource = earnestGate.source;
+        const popupPatch = patchEarnestPopupCreation(earnestGate.source);
+        let patchedSource = popupPatch.source;
         const blockedWarns = blockAllWarnCalls(patchedSource);
-        if (!lessonGate.ready && !earnestGate.ready && blockedWarns.count === 0) return factory;
+        if (!lessonGate.ready && !earnestGate.ready && !popupPatch.ready && blockedWarns.count === 0) return factory;
         patchedSource = blockedWarns.source;
         try {
             const FunctionConstructor = pageWindow.Function || Function;
@@ -96,7 +126,7 @@
             if (lessonGate.ready) pageWindow[LESSON_CLICK_PATCH_FLAG] = true;
             if (earnestGate.ready) pageWindow[EARNEST_CHECK_PATCH_FLAG] = true;
             pageWindow[WARN_BLOCK_COUNT_FLAG] = blockedWarns.count;
-            console.log(`[FxxkEWT360] 页面脚本补丁完成：课程点击=${lessonGate.ready}，认真度检查=${earnestGate.ready}，已阻止 ${blockedWarns.count} 条 warn 调用`);
+            console.log(`[FxxkEWT360] 页面脚本补丁完成：课程点击=${lessonGate.ready}，认真度检查=${earnestGate.ready}，认真度弹窗开关=${popupPatch.ready}，已阻止 ${blockedWarns.count} 条 warn 调用`);
             return patchedFactory;
         } catch (error) {
             console.error('[FxxkEWT360] 替换课程页面脚本失败', error);
@@ -200,17 +230,21 @@
     let screenshotCaptureRunning = false;
     let screenshotExportRunning = false;
     let videoDownloadRunning = false;
+    let wakeLockSentinel = null;
+    let wakeLockRequestPending = false;
     let screenshotSequence = 0;
     let screenshotStatusTimer = null;
     const screenshots = [];
 
     let settings = {
         autoCheck: true,
+        blockEarnestCheck: false,
         autoMute: true,
         playbackSpeed: '1',
         autoSD: true,
         autoNext: true,
         preventPause: true,
+        preventSleep: true,
         accelerateWatchTime: false
     };
 
@@ -253,11 +287,60 @@
         }
     } catch(e) {}
 
+    pageWindow[EARNEST_POPUP_BLOCK_FLAG] = settings.blockEarnestCheck === true;
+
     function saveSettings() {
+        pageWindow[EARNEST_POPUP_BLOCK_FLAG] = settings.blockEarnestCheck === true;
         try {
             localStorage.setItem('fxxkewt_settings', JSON.stringify(settings));
         } catch(e) {}
     }
+
+    async function releaseWakeLock() {
+        const sentinel = wakeLockSentinel;
+        wakeLockSentinel = null;
+        if (!sentinel || sentinel.released) return;
+        try {
+            await sentinel.release();
+        } catch(e) {}
+    }
+
+    async function requestWakeLock() {
+        if (wakeLockSentinel && wakeLockSentinel.released) wakeLockSentinel = null;
+        if (!settings.preventSleep || wakeLockSentinel || wakeLockRequestPending) return;
+        if (!navigator.wakeLock || typeof navigator.wakeLock.request !== 'function') return;
+        if (orgVisibilityState.call(document) !== 'visible') return;
+
+        wakeLockRequestPending = true;
+        try {
+            const sentinel = await navigator.wakeLock.request('screen');
+            if (!settings.preventSleep) {
+                await sentinel.release();
+                return;
+            }
+            wakeLockSentinel = sentinel;
+            sentinel.addEventListener('release', () => {
+                if (wakeLockSentinel === sentinel) wakeLockSentinel = null;
+            }, { once: true });
+        } catch(e) {
+            wakeLockSentinel = null;
+        } finally {
+            wakeLockRequestPending = false;
+        }
+    }
+
+    function syncWakeLock() {
+        if (settings.preventSleep) {
+            void requestWakeLock();
+        } else {
+            void releaseWakeLock();
+        }
+    }
+
+    originalAddEventListener.call(document, 'visibilitychange', () => {
+        if (orgVisibilityState.call(document) === 'visible') syncWakeLock();
+    });
+    setTimeout(syncWakeLock, 0);
 
     function getCapturableVideo() {
         const videos = Array.from(document.querySelectorAll('video')).filter(video =>
@@ -1167,6 +1250,8 @@
         alert([
             'FxxkEWT360 使用注意事项',
             '',
+            '免责声明',
+            '请注意: 因使用本工具导致的任何直接、间接、偶然、特殊、惩罚性或后果性损害（含封号,数据错误,受到惩罚,受到反馈报告等），开发方/提供方均不承担法律责任。本工具不保证满足您的特定需求、不保证持续可用、不保证无错误/无漏洞/无恶意代码、不保证输出结果准确完整。您承诺遵守适用法律法规、平台规则及知识产权法，不得将本工具用于任何违法、侵权、有害或非授权用途。如您不同意上述任一条款，请立即停止使用本工具。 您的继续使用行为即构成对本声明全部内容的不可撤销接受。',
             '1. 使用"一键完成"前，请先播放当前视频，等待页面原生上报组件初始化。一键完成会提交当前课程完成记录并触发页面原生进度上报，请刷新页面确认结果。',
             '2. 开启倍速后若不勾选"倍速同步看课时长", 可能会导致实际看课时长大幅变短，这在后台会有体现; 即使勾选了也请慎用倍速功能。',
             '3. 请谨慎使用处于测试状态的功能，这些功能可能不会按照预期工作。',
@@ -2131,7 +2216,7 @@
             if (props) {
                 const funcKey = Object.keys(props).find(k => typeof props[k] === 'function');
                 const lessonKey = Object.keys(props).find(k => props[k] && typeof props[k] === 'object' && (props[k].contentId || props[k].lessonId || props[k].title));
-                
+
                 if (funcKey && lessonKey) {
                     let callbackSource = '';
                     try {
@@ -2310,7 +2395,7 @@
             pos2 = pos4 - e.clientY;
             pos3 = e.clientX;
             pos4 = e.clientY;
-            
+
             el.style.top = (el.offsetTop - pos2) + "px";
             el.style.left = (el.offsetLeft - pos1) + "px";
             el.style.right = 'auto';
@@ -2568,7 +2653,7 @@
 
             const panel = document.createElement('div');
             panel.id = 'fxxkewt-panel';
-            
+
             try {
                 const pos = localStorage.getItem('fxxkewt_panel_pos');
                 if (pos) {
@@ -2620,6 +2705,14 @@
                         更多工具<span>+</span>
                     </button>
                     <div id="fxxkewt-more-tools" hidden>
+                        <div class="fxxkewt-row">
+                            <span>阻止认真度检测弹窗(实验)</span>
+                            <input type="checkbox" id="fxxkewt-blockEarnestCheck" ${settings.blockEarnestCheck === true ? 'checked' : ''}>
+                        </div>
+                        <div class="fxxkewt-row">
+                            <span>阻止电脑休眠</span>
+                            <input type="checkbox" id="fxxkewt-preventSleep" ${settings.preventSleep ? 'checked' : ''}>
+                        </div>
                         <button type="button" id="fxxkewt-video-download" class="fxxkewt-action-button">下载当前视频</button>
                         <button type="button" id="fxxkewt-screenshot-capture" class="fxxkewt-action-button">截取视频画面 (⌘-S)</button>
                         <button type="button" id="fxxkewt-screenshot-preview" class="fxxkewt-action-button" disabled>预览管理 (0)</button>
@@ -2648,6 +2741,8 @@
 <!--                        <button type="button" id="fxxkewt-quickfinish-single">单请求完成当前视频(实验)</button>-->
                         <div class="fxxkewt-warning">
                         提交当前课程完成记录并触发页面原生进度上报，请刷新页面确认结果。
+                        <br>
+                        阻止认真度检测弹窗只阻止前端生成弹窗，不会伪造通过结果；开启后请刷新页面，对后端是否判定未通过自行确认。
                         <br>
 <!--                        单请求模式只提交一个 EventPackage，stay_time 和 media_time 都是完整剩余时长，speed=1；服务端仍可能拒绝异常大的单次时长，失败时请使用上方普通模式。-->
 <!--                        <br>-->
@@ -2681,6 +2776,15 @@
             panel.querySelector('#fxxkewt-autoCheck').onchange = (e) => {
                 settings.autoCheck = e.target.checked;
                 saveSettings();
+            };
+            panel.querySelector('#fxxkewt-blockEarnestCheck').onchange = (e) => {
+                settings.blockEarnestCheck = e.target.checked;
+                saveSettings();
+            };
+            panel.querySelector('#fxxkewt-preventSleep').onchange = (e) => {
+                settings.preventSleep = e.target.checked;
+                saveSettings();
+                syncWakeLock();
             };
             panel.querySelector('#fxxkewt-autoMute').onchange = (e) => {
                 settings.autoMute = e.target.checked;
@@ -2741,9 +2845,13 @@
                 moreTools.hidden = !expanded;
             };
             panel.querySelector('#fxxkewt-quickfinish').onclick = quickFinish;
-            panel.querySelector('#fxxkewt-quickfinish-single').onclick = quickFinishSingle;
+            const quickFinishSingleButton = panel.querySelector('#fxxkewt-quickfinish-single');
+            if (quickFinishSingleButton) {
+                quickFinishSingleButton.onclick = quickFinishSingle;
+            }
 
             makeDraggable(panel, panel.querySelector('#fxxkewt-header'));
+            syncWakeLock();
             console.log("[FxxkEWT360] 设置面板创建成功");
             showFirstRunNotice();
         } catch(e) {
