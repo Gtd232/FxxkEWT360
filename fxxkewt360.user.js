@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FxxkEWT360
 // @namespace    https://github.com/Gtd232/FxxkEWT360
-// @version      5.2
+// @version      5.3
 // @description  逃避升学e网通
 // @author       Gtd232
 // @match        *://*.ewt360.com/*
@@ -1592,6 +1592,22 @@
         };
     }
 
+    function isCurrentVideoFinished(component = getPlayerComponent()) {
+        const activeLesson = getLessonElements().find(element =>
+            Array.from(element.classList || []).some(className => className.startsWith('active'))
+        );
+        if (activeLesson && isLessonFinished(activeLesson)) return true;
+
+        const video = document.querySelector('video');
+        if (video && video.ended) return true;
+
+        const reporter = component && component.report;
+        const playedDuration = Number(reporter && reporter.videoPlayedDuration);
+        const requiredDuration = Number(reporter && reporter.videoDurationLimit);
+        return Number.isFinite(playedDuration) && Number.isFinite(requiredDuration) &&
+            requiredDuration > 0 && playedDuration >= requiredDuration;
+    }
+
     function getBizPointContext(component, reporter) {
         const player = component.oEplayer;
         const internalPlayer = player && player._player;
@@ -1673,7 +1689,8 @@
         };
     }
 
-    function getReadyQuickFinishContext() {
+    function getReadyQuickFinishContext(options = {}) {
+        const allowCompleted = options.allowCompleted === true;
         const component = getPlayerComponent();
         if (!component) {
             throw new Error('无法定位页面原生进度组件');
@@ -1681,7 +1698,7 @@
 
         const reporter = component.report;
         const isSchoolVideo = reporter.isXBvideo === true;
-        if (!isSchoolVideo && reporter.reportEnabled !== true) {
+        if (!isSchoolVideo && reporter.reportEnabled !== true && !allowCompleted) {
             throw new Error('页面原生进度上报未启用或尚未就绪');
         }
 
@@ -2168,6 +2185,10 @@
         if (quickFinishRunning || seriousCheckSequenceRunning) return;
 
         const useSingleRequestWatchTime = options.watchTimeMode === 'single';
+        const repeatedCompletedVideo = isCurrentVideoFinished();
+        if (repeatedCompletedVideo && !confirm('检测到当前视频已完成，是否从头到尾再次执行一键完成？')) {
+            return;
+        }
         const buttonId = useSingleRequestWatchTime
             ? 'fxxkewt-quickfinish-single'
             : 'fxxkewt-quickfinish';
@@ -2185,13 +2206,18 @@
         }
 
         try {
-            const initialContext = getReadyQuickFinishContext();
+            const initialContext = getReadyQuickFinishContext({ allowCompleted: repeatedCompletedVideo });
             await passActiveCheck();
-            const reportContext = getReadyQuickFinishContext();
+            const reportContext = getReadyQuickFinishContext({ allowCompleted: repeatedCompletedVideo });
             assertSameReportContext(initialContext, reportContext);
 
             const { reporter, target, mode, record } = reportContext;
             const completionTarget = record ? Math.max(target, record.processTime) : reportContext.duration;
+            const completionContext = {
+                ...reportContext,
+                playedDuration: repeatedCompletedVideo ? 0 : reportContext.playedDuration,
+                target: completionTarget
+            };
             let reportTriggered = true;
             let studyRecordSubmitted = false;
             let playbackProgressSubmitted = false;
@@ -2211,7 +2237,7 @@
                 };
             };
             if (mode === 'school') {
-                const schoolContext = { ...reportContext, target: completionTarget };
+                const schoolContext = completionContext;
                 videoCheckSubmitted = await submitSchoolVideoCheckPass(schoolContext);
                 playbackProgressSubmitted = await uploadPlaybackProgress(schoolContext);
                 const watchTimeResult = await uploadWatchTime(schoolContext);
@@ -2229,7 +2255,7 @@
                 } finally {
                     stopNativeReporter(reporter);
                 }
-                const watchTimeResult = await uploadWatchTime({ ...reportContext, target: completionTarget });
+                const watchTimeResult = await uploadWatchTime(completionContext);
                 watchTimeSynced = watchTimeResult.uploaded;
                 watchTimeRequestCount = watchTimeResult.requestCount;
                 watchTimeEventCount = watchTimeResult.eventCount;
@@ -2251,6 +2277,8 @@
                 watchTimeMode: useSingleRequestWatchTime ? 'single' : 'standard',
                 watchTimeRequestCount,
                 watchTimeEventCount,
+                repeatedCompletedVideo,
+                watchTimeStart: completionContext.playedDuration,
                 visualFinishedMarked
             });
             if (useSingleRequestWatchTime && watchTimeRequestCount !== null) {
@@ -2259,7 +2287,9 @@
                     : '当前视频已达到完成阈值，请刷新进度确认');
             } else {
                 alert(reportTriggered
-                    ? '已提交当前视频完成记录，请稍后刷新进度确认'
+                    ? repeatedCompletedVideo
+                        ? '已从头到尾再次提交当前视频完成记录，请稍后刷新进度确认'
+                        : '已提交当前视频完成记录，请稍后刷新进度确认'
                     : '当前视频已达到完成阈值，请刷新进度确认');
             }
         } catch (error) {
