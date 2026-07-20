@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FxxkEWT360
 // @namespace    https://github.com/Gtd232/FxxkEWT360
-// @version      5.4
+// @version      5.5
 // @description  逃避升学e网通
 // @author       Gtd232
 // @match        *://*.ewt360.com/*
@@ -17,7 +17,7 @@
 
 (function() {
     'use strict';
-    const VERSION_FULL = "Beta v5.4";
+    const VERSION_FULL = "Beta v5.5";
 
     const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
     const EARNEST_CHECK_PATCH_FLAG = '__fxxkewt_earnest_check_patched__';
@@ -3141,7 +3141,10 @@
     }, true);
 
     function hideSbAi() {
-        document.querySelector(".vjs-control-bar > div > .container__LJK3Za").style.display = 'none';
+        const sbai = document.querySelector(".vjs-control-bar > div > .container__LJK3Za");
+        if ( sbai ) {
+            sbai.style.display = 'none';
+        }
     }
 
     setTimeout(initPanel, 100);
